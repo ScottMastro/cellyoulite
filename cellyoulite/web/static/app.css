@@ -338,15 +338,49 @@ button.ghost:hover { border-color: var(--err); color: var(--err); }
 }
 #layer-edges polyline {
   fill: none;
-  stroke: #e26a5f;
-  stroke-width: 1.4;
+  stroke: #ff5648;
+  stroke-width: 5;
   stroke-linejoin: round;
+  stroke-linecap: round;
   vector-effect: non-scaling-stroke;
+  filter: drop-shadow(0 0 2px #00000080);
 }
 #layer-circles circle {
   fill: none;
   stroke: #35b779;
-  stroke-width: 1.4;
-  stroke-dasharray: 3 2;
+  stroke-width: 3;
+  stroke-dasharray: 6 4;
   vector-effect: non-scaling-stroke;
+  filter: drop-shadow(0 0 2px #00000080);
 }
+
+/* ---------- thumbnail hover preview ---------- */
+
+#thumb-preview {
+  position: fixed;
+  pointer-events: none;
+  z-index: 1000;
+  background: var(--panel);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  padding: 4px;
+  box-shadow: 0 12px 32px #000c, 0 0 0 1px var(--accent-soft);
+  transform: translateY(-50%);
+  opacity: 0;
+  transition: opacity .08s ease;
+}
+#thumb-preview img {
+  display: block;
+  width: 320px;
+  height: 320px;
+  object-fit: contain;
+  background: #05080c;
+  border-radius: 4px;
+}
+#thumb-preview .cap {
+  font: 500 11px var(--mono);
+  color: var(--ink-soft);
+  padding: 4px 6px 2px;
+  text-align: center;
+}
+#thumb-preview.show { opacity: 1; }

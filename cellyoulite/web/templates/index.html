@@ -92,6 +92,11 @@
 
 </main>
 
+<div id="thumb-preview" aria-hidden="true">
+  <img id="thumb-preview-img" alt="">
+  <div class="cap" id="thumb-preview-cap"></div>
+</div>
+
 <footer>CellxYou Lite · <span id="ver-mono">v{{ version }}</span></footer>
 
 <script>
@@ -183,7 +188,39 @@
 
     grid.querySelectorAll(".thumb[data-key]").forEach(el => {
       el.onclick = () => openViewer(el.dataset.tx, parseInt(el.dataset.t), el.dataset.key);
+      el.addEventListener("mouseenter", onThumbEnter);
+      el.addEventListener("mouseleave", hidePreview);
+      el.addEventListener("mousemove", positionPreview);
     });
+  }
+
+  // ---------------- hover preview ----------------
+
+  const preview = $("thumb-preview");
+  const previewImg = $("thumb-preview-img");
+  const previewCap = $("thumb-preview-cap");
+
+  function onThumbEnter(e) {
+    const el = e.currentTarget;
+    const url = `/api/image?folder=${encodeURIComponent(currentFolder)}&key=${encodeURIComponent(el.dataset.key)}`;
+    previewImg.src = url;
+    previewCap.textContent = `${el.dataset.tx} · T${el.dataset.t}`;
+    preview.classList.add("show");
+    positionPreview(e);
+  }
+  function positionPreview(e) {
+    const PAD = 16;
+    const W = 332, H = 360;
+    let x = e.clientX + PAD;
+    let y = e.clientY;
+    if (x + W > window.innerWidth) x = e.clientX - W - PAD;
+    if (y - H / 2 < 8) y = H / 2 + 8;
+    if (y + H / 2 > window.innerHeight - 8) y = window.innerHeight - H / 2 - 8;
+    preview.style.left = `${x}px`;
+    preview.style.top  = `${y}px`;
+  }
+  function hidePreview() {
+    preview.classList.remove("show");
   }
 
   // ---------------- viewer ----------------
