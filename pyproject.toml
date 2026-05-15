@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cellyoulite"
+dynamic = ["version"]
+description = "Organoid segmentation and time-series analysis for wet-lab biologists"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "jinja2>=3.1",
+    "python-multipart>=0.0.9",
+    "numpy>=1.24",
+    "scikit-image>=0.22",
+    "opencv-python-headless>=4.9",
+    "pandas>=2.0",
+    "matplotlib>=3.8",
+    "plotly>=5.18",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "ruff>=0.3"]
+
+[project.scripts]
+cellyoulite = "cellyoulite.launcher:main"
+
+[tool.hatch.version]
+path = "cellyoulite/__version__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["cellyoulite"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"cellyoulite/web/templates" = "cellyoulite/web/templates"
+"cellyoulite/web/static" = "cellyoulite/web/static"

@@ -1,0 +1,222 @@
+/* CellYouLite — aesthetic
+   Clean lab-instrument look. Cream paper base, viridis-derived accent,
+   Inter for UI, JetBrains Mono for paths and numbers. Dark mode via
+   prefers-color-scheme. */
+
+@import url("https://rsms.me/inter/inter.css");
+@import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap");
+
+:root {
+  --bg:        #f7f4ee;       /* parchment */
+  --panel:    #ffffff;
+  --ink:      #1f2933;
+  --ink-soft: #4a5568;
+  --muted:    #8a93a0;
+  --rule:     #e7e2d6;
+  --accent:   #1f9e89;        /* viridis teal */
+  --accent-2: #31688e;
+  --accent-soft: #1f9e8920;
+  --warn:     #c97a3a;
+  --ok:       #35b779;
+  --radius:   10px;
+  --shadow:   0 1px 2px rgba(20, 22, 28, .04), 0 8px 24px rgba(20, 22, 28, .04);
+  --mono:     "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --sans:     "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:       #14171c;
+    --panel:    #1c2026;
+    --ink:      #e8ebef;
+    --ink-soft: #b6bcc6;
+    --muted:    #7a828e;
+    --rule:     #262b32;
+    --accent-soft: #1f9e8930;
+    --shadow:   0 1px 2px rgba(0, 0, 0, .35), 0 8px 24px rgba(0, 0, 0, .35);
+  }
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font: 14px/1.55 var(--sans);
+  font-feature-settings: "cv11", "ss03";
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---------- header ---------- */
+
+.app-header {
+  display: flex; align-items: center; gap: .75rem;
+  padding: 1.1rem 1.6rem;
+  border-bottom: 1px solid var(--rule);
+  background: var(--panel);
+}
+.brand { display: flex; align-items: center; gap: .65rem; }
+.brand svg { display: block; }
+.brand .name {
+  font-weight: 600; font-size: 1.05rem; letter-spacing: -0.01em;
+}
+.brand .name em {
+  font-style: normal; color: var(--accent); font-weight: 600;
+}
+.brand .tag {
+  font-family: var(--mono); font-size: .72rem;
+  color: var(--muted); padding: 2px 6px; border: 1px solid var(--rule);
+  border-radius: 999px; margin-left: .35rem;
+}
+.spacer { flex: 1; }
+.app-header .version {
+  font-family: var(--mono); font-size: .78rem; color: var(--muted);
+}
+
+/* ---------- layout ---------- */
+
+main {
+  max-width: 1100px;
+  margin: 1.75rem auto 4rem;
+  padding: 0 1.6rem;
+  display: grid;
+  gap: 1.25rem;
+}
+
+.stepper {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: .75rem;
+  margin-bottom: .25rem;
+}
+.step {
+  display: flex; gap: .65rem; align-items: center;
+  padding: .75rem .9rem;
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.step .num {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 1.5rem; height: 1.5rem; border-radius: 50%;
+  background: var(--accent-soft); color: var(--accent);
+  font-family: var(--mono); font-size: .8rem; font-weight: 500;
+}
+.step .label { font-weight: 500; }
+.step .sub { color: var(--muted); font-size: .82rem; margin-left: auto; }
+.step.active { border-color: var(--accent); }
+.step.done .num { background: var(--accent); color: white; }
+
+/* ---------- cards ---------- */
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 1.25rem 1.4rem;
+}
+.card h2 {
+  margin: 0 0 .4rem;
+  font-size: 1rem; font-weight: 600;
+  letter-spacing: -0.005em;
+}
+.card .hint { color: var(--ink-soft); margin: 0 0 1rem; font-size: .92rem; }
+
+.row { display: flex; gap: .6rem; align-items: stretch; flex-wrap: wrap; }
+
+input[type="text"] {
+  flex: 1; min-width: 18rem;
+  font: 13px var(--mono); color: var(--ink);
+  padding: .55rem .7rem;
+  background: var(--bg);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  transition: border-color .12s ease, box-shadow .12s ease;
+}
+input[type="text"]:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+button {
+  font: 500 13px var(--sans);
+  padding: .55rem .9rem;
+  border: 1px solid var(--rule);
+  background: var(--panel);
+  color: var(--ink);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all .12s ease;
+}
+button:hover { border-color: var(--accent); color: var(--accent); }
+button.primary {
+  background: var(--accent); border-color: var(--accent); color: white;
+}
+button.primary:hover { filter: brightness(1.05); color: white; }
+button:disabled { opacity: .55; cursor: not-allowed; }
+
+/* ---------- status pills ---------- */
+
+.pills { display: flex; gap: .4rem; flex-wrap: wrap; margin-top: .85rem; }
+.pill {
+  font-family: var(--mono); font-size: .75rem;
+  padding: 3px 9px; border-radius: 999px;
+  background: var(--bg); border: 1px solid var(--rule);
+  color: var(--ink-soft);
+}
+.pill strong { color: var(--ink); font-weight: 500; }
+
+/* ---------- log / output ---------- */
+
+pre.log {
+  background: var(--bg);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  padding: .7rem .9rem;
+  font: 12px/1.55 var(--mono);
+  color: var(--ink-soft);
+  overflow: auto;
+  max-height: 14rem;
+  margin: .9rem 0 0;
+}
+
+/* ---------- spinner / status dot ---------- */
+
+.dot {
+  display: inline-block; width: 8px; height: 8px;
+  border-radius: 50%; background: var(--muted);
+  margin-right: .4rem;
+  vertical-align: middle;
+}
+.dot.live { background: var(--accent); animation: pulse 1.4s ease-in-out infinite; }
+.dot.ok { background: var(--ok); }
+.dot.err { background: var(--warn); }
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: .45; transform: scale(.78); }
+}
+
+/* ---------- plot area ---------- */
+
+#plot-out {
+  min-height: 0;
+  transition: min-height .3s ease;
+}
+#plot-out:not(:empty) {
+  min-height: 640px;
+  margin-top: 1rem;
+  padding: .25rem;
+  background: var(--panel);
+  border-radius: 8px;
+}
+
+footer {
+  text-align: center; color: var(--muted);
+  font: 12px var(--mono);
+  padding: 1.25rem 0 2rem;
+}
+footer a { color: var(--accent); text-decoration: none; }
