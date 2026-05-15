@@ -1,4 +1,4 @@
-# CellYouLite — Project Context
+# Cell+You Lite — Project Context
 
 ## One-line
 A desktop app that segments organoids from a grid of brightfield/greyscale time-lapse images, measures their size across time, and produces simple plots — designed to be launched by a wet-lab biologist on Windows or macOS with no command line.
