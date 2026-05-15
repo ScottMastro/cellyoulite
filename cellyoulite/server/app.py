@@ -3,13 +3,14 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
+import cv2
 import numpy as np
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from skimage import measure
 from skimage.io import imread
+from skimage.segmentation import find_boundaries
 from starlette.requests import Request
 
 from cellyoulite.__version__ import __version__
@@ -81,28 +82,45 @@ def image(folder: str, key: str) -> FileResponse:
 
 @app.get("/api/overlay")
 def overlay(folder: str, key: str) -> dict:
-    """Per-image segmentation: contours (pixel mask) + best-fit circles."""
+    """Per-image segmentation: best-fit circles (the edge mask is a PNG at /api/edges)."""
     path = _safe_image_path(folder, key)
     img = imread(path, as_gray=True).astype(float)
     seg = segment_image(img)
 
-    contours: list[list[list[float]]] = []
     circles: list[dict] = []
-
     for idx, region in enumerate(seg.regions):
         if not passes_qc(region):
             continue
         obj_mask = seg.labels == (idx + 1)
-        for c in measure.find_contours(obj_mask.astype(np.uint8), 0.5):
-            # find_contours returns (row, col) — flip to (x, y) for SVG.
-            contours.append([[float(c[i, 1]), float(c[i, 0])] for i in range(len(c))])
         fit = fit_circle(obj_mask)
         circles.append({"cx": fit.cx, "cy": fit.cy, "r": fit.radius})
 
     h, w = img.shape
     return {"width": int(w), "height": int(h),
-            "contours": contours, "circles": circles,
-            "n_passed": len(circles)}
+            "circles": circles, "n_passed": len(circles)}
+
+
+@app.get("/api/edges")
+def edges(folder: str, key: str) -> Response:
+    """Transparent PNG with the raw segmentation-boundary pixels (chunky OpenCV look)."""
+    path = _safe_image_path(folder, key)
+    img = imread(path, as_gray=True).astype(float)
+    seg = segment_image(img)
+
+    qc_mask = np.zeros_like(seg.mask, dtype=bool)
+    for idx, region in enumerate(seg.regions):
+        if passes_qc(region):
+            qc_mask |= seg.labels == (idx + 1)
+
+    boundary = find_boundaries(qc_mask, mode="thick")
+    h, w = boundary.shape
+    bgra = np.zeros((h, w, 4), dtype=np.uint8)
+    # OpenCV BGRA — bright red, fully opaque on edge pixels.
+    bgra[boundary] = [72, 86, 255, 255]
+    ok, png = cv2.imencode(".png", bgra)
+    if not ok:
+        raise HTTPException(status_code=500, detail="png encode failed")
+    return Response(content=png.tobytes(), media_type="image/png")
 
 
 @app.get("/api/analyze")

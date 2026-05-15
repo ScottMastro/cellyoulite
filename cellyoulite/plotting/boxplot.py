@@ -42,6 +42,6 @@ def boxplot_by_timepoint(df: pd.DataFrame, *, value: str = "area_px",
                      linecolor="#2f3845", zerolinecolor="#2f3845")
     fig.for_each_annotation(lambda a: a.update(text=a.text.split("=")[-1]))
     buf = io.StringIO()
-    fig.write_html(buf, include_plotlyjs="cdn", full_html=False,
+    fig.write_html(buf, include_plotlyjs=False, full_html=False,
                    config={"displaylogo": False})
     return buf.getvalue()

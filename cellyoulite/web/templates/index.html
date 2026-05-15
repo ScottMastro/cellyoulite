@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>CellxYou Lite · organoid time-series</title>
   <link rel="stylesheet" href="/static/app.css">
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
   <link rel="icon" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='13' fill='none' stroke='%2335b779' stroke-width='2'/><circle cx='16' cy='16' r='6' fill='%2335b779'/></svg>">
 </head>
 <body>
@@ -65,11 +66,13 @@
         <button id="viewer-close" class="ghost">close</button>
       </div>
       <div class="viewer-canvas">
-        <img id="viewer-img" alt="">
-        <svg id="viewer-svg" preserveAspectRatio="xMidYMid meet">
-          <g id="layer-edges"></g>
-          <g id="layer-circles"></g>
-        </svg>
+        <div class="image-stack">
+          <img id="viewer-img" class="base" alt="">
+          <img id="layer-edges-img" class="overlay" alt="">
+          <svg id="viewer-svg" class="overlay" preserveAspectRatio="none">
+            <g id="layer-circles"></g>
+          </svg>
+        </div>
       </div>
     </div>
   </section>
@@ -233,19 +236,19 @@
     $("viewer-title").textContent = `${tx} · timepoint ${t} · ${key}`;
     $("viewer-stat").textContent = "loading…";
     const img = $("viewer-img");
+    const edgesImg = $("layer-edges-img");
     const svg = $("viewer-svg");
-    img.src = `/api/image?folder=${encodeURIComponent(currentFolder)}&key=${encodeURIComponent(key)}`;
+    const qs = `folder=${encodeURIComponent(currentFolder)}&key=${encodeURIComponent(key)}`;
+    img.src = `/api/image?${qs}`;
+    edgesImg.src = `/api/edges?${qs}`;
 
     try {
-      const r = await fetch(`/api/overlay?folder=${encodeURIComponent(currentFolder)}&key=${encodeURIComponent(key)}`);
+      const r = await fetch(`/api/overlay?${qs}`);
       const data = await r.json();
       if (!r.ok) throw new Error(data.detail || r.statusText);
       currentOverlay = data;
 
       svg.setAttribute("viewBox", `0 0 ${data.width} ${data.height}`);
-      $("layer-edges").innerHTML = data.contours.map(c =>
-        `<polyline points="${c.map(p => p.join(",")).join(" ")}" />`
-      ).join("");
       $("layer-circles").innerHTML = data.circles.map(c =>
         `<circle cx="${c.cx}" cy="${c.cy}" r="${c.r}" />`
       ).join("");
@@ -258,7 +261,7 @@
   }
 
   const applyToggles = () => {
-    $("layer-edges").style.display = $("toggle-edges").checked ? "" : "none";
+    $("layer-edges-img").style.display = $("toggle-edges").checked ? "" : "none";
     $("layer-circles").style.display = $("toggle-circles").checked ? "" : "none";
   };
   $("toggle-edges").onchange = applyToggles;
@@ -283,9 +286,10 @@
         ["median area (px)", Math.round(data.median_area_px || 0)],
       ]);
       $("plot-out").innerHTML = data.plot_html;
+      // Plotly is pre-loaded on the page; eval the inline figure script so it executes.
       $("plot-out").querySelectorAll("script").forEach((s) => {
         const n = document.createElement("script");
-        if (s.src) n.src = s.src; else n.textContent = s.textContent;
+        n.textContent = s.textContent;
         s.replaceWith(n);
       });
       $("analyze-status").textContent = "";
