@@ -1,8 +1,8 @@
 <div align="center">
 
-<img src="https://raw.githubusercontent.com/ScottMastro/cellyoulite/main/cellyoulite/web/static/logo.svg" width="72" alt="Cell+You Lite"/>
+<img src="https://raw.githubusercontent.com/ScottMastro/cellyoulite/main/cellyoulite/web/static/logo.svg" width="72" alt="CellxYou Lite"/>
 
-# Cell+You Lite
+# CellxYou Lite
 
 **Organoid segmentation and time-series analysis for wet-lab biologists.**
 
@@ -14,7 +14,7 @@ A local web app that turns a folder of brightfield time-lapse images into clean 
 
 ## What it does
 
-Given a grid of greyscale images organised by **treatment × timepoint**, Cell+You Lite:
+Given a grid of greyscale images organised by **treatment × timepoint**, CellxYou Lite:
 
 1. **Segments** each organoid with a classical pipeline (Gaussian → Otsu → morphology → connected components).
 2. Reports **two size models** per organoid:

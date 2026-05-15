@@ -48,7 +48,7 @@ def main() -> None:
     url = f"http://{args.host}:{args.port}"
     if not args.no_browser:
         _open_browser(url)
-    print(f"Cell+You Lite v{__version__} — serving at {url}")
+    print(f"CellxYou Lite v{__version__} — serving at {url}")
     uvicorn.run("cellyoulite.server.app:app", host=args.host, port=args.port, log_level="warning")
 
 

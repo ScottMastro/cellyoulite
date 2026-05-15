@@ -18,7 +18,7 @@ from cellyoulite.simulator import SimConfig, generate_dataset
 _WEB = Path(__file__).resolve().parent.parent / "web"
 templates = Jinja2Templates(directory=str(_WEB / "templates"))
 
-app = FastAPI(title="Cell+You Lite", version=__version__)
+app = FastAPI(title="CellxYou Lite", version=__version__)
 app.mount("/static", StaticFiles(directory=str(_WEB / "static")), name="static")
 
 
