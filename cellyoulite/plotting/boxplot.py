@@ -24,16 +24,22 @@ def boxplot_by_timepoint(df: pd.DataFrame, *, value: str = "area_px",
         color_discrete_sequence=_PALETTE,
     )
     fig.update_layout(
-        template="plotly_white",
+        template="plotly_dark",
         height=620,
         margin=dict(l=48, r=24, t=48, b=48),
-        font=dict(family="Inter, system-ui, sans-serif", size=12, color="#1f2933"),
+        font=dict(family="Inter, system-ui, sans-serif", size=12, color="#e6e9ee"),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         showlegend=False,
     )
-    fig.update_xaxes(showgrid=False, title_text="timepoint", tickfont=dict(size=10))
-    fig.update_yaxes(gridcolor="#e6e8eb", title_text=value, tickfont=dict(size=10))
+    fig.update_xaxes(showgrid=False, title_text="timepoint",
+                     tickfont=dict(size=10, color="#b3bac5"),
+                     title_font=dict(color="#b3bac5"),
+                     linecolor="#2f3845")
+    fig.update_yaxes(gridcolor="#232a33", title_text=value,
+                     tickfont=dict(size=10, color="#b3bac5"),
+                     title_font=dict(color="#b3bac5"),
+                     linecolor="#2f3845", zerolinecolor="#2f3845")
     fig.for_each_annotation(lambda a: a.update(text=a.text.split("=")[-1]))
     buf = io.StringIO()
     fig.write_html(buf, include_plotlyjs="cdn", full_html=False,
