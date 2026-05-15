@@ -4,11 +4,11 @@
 
 # CellxYou Lite
 
-**Organoid segmentation and time-series analysis for wet-lab biologists.**
+**Computer-vision tool for measuring organoid size over time.**
 
 </div>
 
-Drop a folder of brightfield time-lapse images into the app. CellxYou Lite segments each organoid, measures its size two ways (exact pixel mask and best-fit circle), and produces a boxplot of size over time per treatment. Runs locally — your images never leave your machine.
+CellxYou Lite takes a time series of brightfield images, segments each organoid, and plots its size over time. Two segmentation models are produced per organoid: an exact pixel-mask area, and a best-fit circle. Results are grouped by treatment and rendered as boxplots across timepoints.
 
 ## Setup
 
