@@ -24,5 +24,3 @@ cellyoulite serve
 The app opens in your browser at `http://localhost:8765`. Click **Generate demo** to try it on synthetic data.
 
 Filenames must encode treatment + timepoint, e.g. `A01.tif`, `H_12.png`.
-
-See [`CONTEXT.md`](./CONTEXT.md) for the problem statement and design decisions.
