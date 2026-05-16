@@ -1,0 +1,16 @@
+{
+  "well": "DMSO r1",
+  "label": "00d00h00m",
+  "aligned": true,
+  "key": "m_4614bea3/DMSO r1/CA1_B9_1_00d00h00m.tif",
+  "image_w": 1424,
+  "image_h": 1056,
+  "circles": [
+    {
+      "cx": 706.0,
+      "cy": 134.40625,
+      "r": 26.419689627245813,
+      "star": false
+    }
+  ]
+}

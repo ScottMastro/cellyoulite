@@ -14,6 +14,9 @@ build/
 # Local alignment QC outputs
 /align_check/
 
+# Per-method circle-detection QC stills (regenerable from data/)
+/circle_check/
+
 # On-disk alignment cache (regenerated on demand from data/)
 /.align_cache/
 

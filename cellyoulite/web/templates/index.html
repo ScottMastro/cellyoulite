@@ -34,9 +34,10 @@
     <h2>Data folder</h2>
     <div class="data-row">
       <span id="data-path" class="mono small">—</span>
+      <button id="refresh" class="ghost">Refresh</button>
       <button id="reveal" class="ghost">Open in Files</button>
     </div>
-    <p class="hint">Drop subfolders named <code>&lt;treatment&gt; r&lt;replicate&gt;</code> in here, then reload the page.</p>
+    <p class="hint">Each experiment is a subfolder named <code>&lt;treatment&gt; r&lt;replicate&gt;</code>. Add or edit folders, then hit Refresh.</p>
     <div class="pills" id="grid-pills" hidden></div>
   </section>
 
@@ -162,6 +163,7 @@
     await refreshGrid();
   }
 
+  $("refresh").onclick = () => refreshAll();
   $("reveal").onclick = async () => {
     try {
       const r = await fetch("/api/reveal", { method: "POST" });
