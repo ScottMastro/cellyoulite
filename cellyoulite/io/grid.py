@@ -5,43 +5,86 @@ from dataclasses import dataclass
 from pathlib import Path
 
 _IMAGE_EXTS = {".tif", ".tiff", ".png", ".jpg", ".jpeg", ".bmp"}
-_PATTERN = re.compile(r"(?P<treatment>[A-H])[_-]?(?P<timepoint>\d{1,2})", re.IGNORECASE)
+
+# Folder name: "<treatment> r<replicate>" — treatment may contain "+" / spaces.
+_FOLDER_RE = re.compile(r"^(?P<treatment>.+?)\s+r(?P<replicate>\d+)\s*$", re.IGNORECASE)
+# Filename timestamp: e.g. "00d04h15m"
+_TIME_RE = re.compile(r"(?P<d>\d+)d(?P<h>\d+)h(?P<m>\d+)m", re.IGNORECASE)
+
+
+def _normalize_treatment(name: str) -> str:
+    # Collapse internal whitespace and tidy stray spaces around "+".
+    return re.sub(r"\s*\+\s*", "+", " ".join(name.split())).strip()
 
 
 @dataclass(frozen=True)
-class GridCell:
-    treatment: str
-    timepoint: int
+class Timepoint:
+    minutes: int          # total minutes since start of series
+    label: str            # raw "00d04h15m" token from filename
+    key: str              # path relative to the root folder ("<subdir>/<file>")
     path: Path
+
+
+@dataclass(frozen=True)
+class Well:
+    treatment: str
+    replicate: int
+    folder_name: str
+    timepoints: list[Timepoint]
 
 
 @dataclass(frozen=True)
 class GridSpec:
     treatments: list[str]
-    timepoints: list[int]
-    cells: list[GridCell]
+    replicates: list[int]
+    wells: list[Well]
+
+    @property
+    def n_images(self) -> int:
+        return sum(len(w.timepoints) for w in self.wells)
 
 
 def discover_grid(folder: str | Path) -> GridSpec:
-    """Walk a folder and group images into a treatment x timepoint grid.
+    """Walk a root folder. Each immediate subdirectory is one well.
 
-    Convention: filenames contain a token like "A3", "B_07", "h-12" where the
-    letter is treatment and the digits are timepoint. Files not matching are
-    skipped — callers should warn the user about skipped files.
+    Subfolder naming: "<treatment> r<replicate>", e.g. "012+S9A13 r2".
+    Timepoints are parsed from any "\\d+d\\d+h\\d+m" token in the filename.
     """
-    folder = Path(folder)
-    cells: list[GridCell] = []
-    for p in sorted(folder.iterdir()):
-        if p.suffix.lower() not in _IMAGE_EXTS:
+    root = Path(folder)
+    wells: list[Well] = []
+
+    for sub in sorted(root.iterdir()):
+        if not sub.is_dir():
             continue
-        m = _PATTERN.search(p.stem)
+        m = _FOLDER_RE.match(sub.name)
         if not m:
             continue
-        cells.append(GridCell(
-            treatment=m.group("treatment").upper(),
-            timepoint=int(m.group("timepoint")),
-            path=p,
-        ))
-    treatments = sorted({c.treatment for c in cells})
-    timepoints = sorted({c.timepoint for c in cells})
-    return GridSpec(treatments=treatments, timepoints=timepoints, cells=cells)
+        treatment = _normalize_treatment(m.group("treatment"))
+        replicate = int(m.group("replicate"))
+
+        tps: list[Timepoint] = []
+        for p in sorted(sub.iterdir()):
+            if p.suffix.lower() not in _IMAGE_EXTS:
+                continue
+            tm = _TIME_RE.search(p.stem)
+            if not tm:
+                continue
+            minutes = int(tm.group("d")) * 1440 + int(tm.group("h")) * 60 + int(tm.group("m"))
+            tps.append(Timepoint(
+                minutes=minutes,
+                label=tm.group(0),
+                key=f"{sub.name}/{p.name}",
+                path=p,
+            ))
+        tps.sort(key=lambda t: t.minutes)
+        if tps:
+            wells.append(Well(
+                treatment=treatment,
+                replicate=replicate,
+                folder_name=sub.name,
+                timepoints=tps,
+            ))
+
+    treatments = sorted({w.treatment for w in wells})
+    replicates = sorted({w.replicate for w in wells})
+    return GridSpec(treatments=treatments, replicates=replicates, wells=wells)

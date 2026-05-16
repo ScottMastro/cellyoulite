@@ -31,14 +31,14 @@
 <main>
 
   <nav class="stepper" aria-label="workflow">
-    <div class="step" id="step-1"><span class="num">1</span><span class="label">Load</span><span class="sub">images</span></div>
-    <div class="step" id="step-2"><span class="num">2</span><span class="label">Inspect</span><span class="sub">verify edges</span></div>
+    <div class="step" id="step-1"><span class="num">1</span><span class="label">Load</span><span class="sub">wells</span></div>
+    <div class="step" id="step-2"><span class="num">2</span><span class="label">Inspect</span><span class="sub">timeseries</span></div>
     <div class="step" id="step-3"><span class="num">3</span><span class="label">Plot</span><span class="sub">size over time</span></div>
   </nav>
 
   <section class="card">
     <h2>Source folder</h2>
-    <p class="hint">Filenames should encode treatment + timepoint, e.g. <code>A01.tif</code>, <code>H_12.png</code>. Or click <em>Generate demo</em> to synthesise a dataset.</p>
+    <p class="hint">Layout: <code>&lt;root&gt;/&lt;treatment&gt; r&lt;replicate&gt;/&lt;...&gt;_&lt;DDdHHhMMm&gt;.tif</code>. Or click <em>Generate demo</em> to synthesise a dataset.</p>
     <div class="row">
       <input id="folder" type="text" placeholder="/path/to/images" spellcheck="false">
       <button id="scan">Scan</button>
@@ -48,23 +48,29 @@
   </section>
 
   <section class="card" id="grid-card" hidden>
-    <h2>Inspect the grid <span class="muted-inline">— click any well to verify edge detection</span></h2>
-    <p class="hint">Rows = treatments, columns = timepoints. Selected well opens below with the two overlay models.</p>
+    <h2>Well grid <span class="muted-inline">— rows = treatments, columns = replicates · click to open timeseries</span></h2>
     <div class="grid-wrap">
       <div id="thumb-grid" class="thumb-grid"></div>
     </div>
+  </section>
 
-    <div id="viewer" class="viewer" hidden>
+  <section class="card" id="well-card" hidden>
+    <h2 id="well-title">Well · timeseries</h2>
+
+    <div class="viewer">
       <div class="viewer-toolbar">
-        <span id="viewer-title" class="viewer-title"></span>
+        <span id="well-frame-label" class="viewer-title">—</span>
         <div class="spacer"></div>
+        <label class="toggle"><input type="checkbox" id="toggle-align" checked>
+          <span class="swatch swatch-align"></span> align frames</label>
         <label class="toggle"><input type="checkbox" id="toggle-edges" checked>
           <span class="swatch swatch-edges"></span> pixel edges</label>
         <label class="toggle"><input type="checkbox" id="toggle-circles" checked>
           <span class="swatch swatch-circles"></span> best-fit circles</label>
         <span id="viewer-stat" class="pill"></span>
-        <button id="viewer-close" class="ghost">close</button>
+        <button id="well-close" class="ghost">close</button>
       </div>
+
       <div class="viewer-canvas">
         <div class="image-stack">
           <img id="viewer-img" class="base" alt="">
@@ -74,12 +80,33 @@
           </svg>
         </div>
       </div>
+
+      <div class="playbar">
+        <button id="play-btn" class="primary play-btn" title="play/pause">▶</button>
+        <input id="scrub" type="range" min="0" max="0" value="0" step="1">
+        <span id="scrub-label" class="mono small">0 / 0</span>
+        <label class="speed">speed
+          <select id="speed">
+            <option value="500">0.5×</option>
+            <option value="250" selected>1×</option>
+            <option value="125">2×</option>
+            <option value="60">4×</option>
+          </select>
+        </label>
+        <button id="well-analyze" class="ghost">Analyze this well</button>
+      </div>
+
+      <div class="filmstrip-wrap">
+        <div id="filmstrip" class="filmstrip"></div>
+      </div>
+
+      <div id="well-plot" class="well-plot"></div>
     </div>
   </section>
 
   <section class="card">
     <h2>Run full analysis</h2>
-    <p class="hint">Two readouts per organoid: <strong>pixel mask</strong> (exact area) and <strong>best-fit circle</strong> (idealised). Precision-over-recall — ambiguous objects are discarded.</p>
+    <p class="hint">Two readouts per organoid: <strong>pixel mask</strong> (exact area) and <strong>best-fit circle</strong> (idealised). Precision-over-recall — ambiguous objects are discarded. Replicates are pooled within each treatment.</p>
     <div class="row">
       <button id="analyze" class="primary" disabled>Analyze folder</button>
       <span id="analyze-status" style="align-self:center; color: var(--ink-soft);"></span>
@@ -89,7 +116,7 @@
 
   <section class="card">
     <h2>Size across time</h2>
-    <p class="hint">Boxplot per treatment, faceted. Hover for distributions.</p>
+    <p class="hint">Boxplot per treatment, faceted by treatment, x = timepoint index, y = area in pixels.</p>
     <div id="plot-out"></div>
   </section>
 
@@ -107,7 +134,9 @@
   const status = $("status");
   let currentFolder = null;
   let currentGrid = null;
-  let currentOverlay = null;
+  let currentWell = null;        // {treatment, replicate, timepoints: [...]}
+  let currentTIdx = 0;
+  let playTimer = null;
 
   const setStatus = (cls, text) => {
     status.innerHTML = `<span class="dot ${cls}"></span>${text}`;
@@ -121,6 +150,18 @@
     const el = $(target);
     el.innerHTML = items.map(([k, v]) => `<span class="pill">${k} <strong>${v}</strong></span>`).join("");
     el.hidden = items.length === 0;
+  };
+  const alignFlag = () => ($("toggle-align") && $("toggle-align").checked) ? 1 : 0;
+  const imgUrl = (key, thumb = 0, aligned = 0) => {
+    let q = `folder=${encodeURIComponent(currentFolder)}&key=${encodeURIComponent(key)}`;
+    if (thumb)   q += `&thumb=${thumb}`;
+    if (aligned) q += `&aligned=1`;
+    return `/api/image?${q}`;
+  };
+  const edgesUrl = (key, aligned = 0) => {
+    let q = `folder=${encodeURIComponent(currentFolder)}&key=${encodeURIComponent(key)}`;
+    if (aligned) q += `&aligned=1`;
+    return `/api/edges?${q}`;
   };
 
   // ---------------- scan + grid ----------------
@@ -138,13 +179,14 @@
       currentGrid = data;
       renderPills("grid-pills", [
         ["treatments", data.treatments.length],
-        ["timepoints", data.timepoints.length],
-        ["images", data.n_cells],
+        ["replicates", data.replicates.length],
+        ["wells", data.n_wells],
+        ["images", data.n_images],
       ]);
       renderThumbGrid(data);
       $("grid-card").hidden = false;
       $("analyze").disabled = false;
-      setStatus("ok", `loaded ${data.n_cells} images`);
+      setStatus("ok", `loaded ${data.n_wells} wells (${data.n_images} images)`);
       setStep(1, "done"); setStep(2, "active");
     } catch (e) {
       setStatus("err", String(e.message || e));
@@ -165,24 +207,23 @@
   };
 
   function renderThumbGrid(data) {
-    const { treatments, timepoints, cells } = data;
-    const byKey = new Map(cells.map(c => [`${c.treatment}/${c.timepoint}`, c]));
+    const { treatments, replicates, wells } = data;
+    const byKey = new Map(wells.map(w => [`${w.treatment}/${w.replicate}`, w]));
     const grid = $("thumb-grid");
-    grid.style.gridTemplateColumns = `auto repeat(${timepoints.length}, minmax(0, 1fr))`;
+    grid.style.gridTemplateColumns = `auto repeat(${replicates.length}, 88px)`;
 
     let html = `<div class="th corner"></div>`;
-    for (const t of timepoints) html += `<div class="th col">T${t}</div>`;
+    for (const r of replicates) html += `<div class="th col">r${r}</div>`;
     for (const tx of treatments) {
       html += `<div class="th row">${tx}</div>`;
-      for (const t of timepoints) {
-        const cell = byKey.get(`${tx}/${t}`);
-        if (!cell) {
+      for (const r of replicates) {
+        const w = byKey.get(`${tx}/${r}`);
+        if (!w || !w.thumb_key) {
           html += `<div class="thumb empty"></div>`;
         } else {
-          const url = `/api/image?folder=${encodeURIComponent(currentFolder)}&key=${encodeURIComponent(cell.key)}`;
-          html += `<div class="thumb" data-tx="${tx}" data-t="${t}" data-key="${cell.key}">
-                     <img loading="lazy" src="${url}" alt="${tx}${t}">
-                     <span class="thumb-tag">${tx}${String(t).padStart(2,"0")}</span>
+          html += `<div class="thumb" data-tx="${tx}" data-rep="${r}" data-key="${w.thumb_key}">
+                     <img loading="lazy" src="${imgUrl(w.thumb_key, 128)}" alt="${tx} r${r}">
+                     <span class="thumb-tag">r${r}</span>
                    </div>`;
         }
       }
@@ -190,7 +231,7 @@
     grid.innerHTML = html;
 
     grid.querySelectorAll(".thumb[data-key]").forEach(el => {
-      el.onclick = () => openViewer(el.dataset.tx, parseInt(el.dataset.t), el.dataset.key);
+      el.onclick = () => openWell(el.dataset.tx, parseInt(el.dataset.rep));
       el.addEventListener("mouseenter", onThumbEnter);
       el.addEventListener("mouseleave", hidePreview);
       el.addEventListener("mousemove", positionPreview);
@@ -205,9 +246,8 @@
 
   function onThumbEnter(e) {
     const el = e.currentTarget;
-    const url = `/api/image?folder=${encodeURIComponent(currentFolder)}&key=${encodeURIComponent(el.dataset.key)}`;
-    previewImg.src = url;
-    previewCap.textContent = `${el.dataset.tx} · T${el.dataset.t}`;
+    previewImg.src = imgUrl(el.dataset.key, 512);
+    previewCap.textContent = `${el.dataset.tx} · r${el.dataset.rep}`;
     preview.classList.add("show");
     positionPreview(e);
   }
@@ -222,43 +262,106 @@
     preview.style.left = `${x}px`;
     preview.style.top  = `${y}px`;
   }
-  function hidePreview() {
-    preview.classList.remove("show");
+  function hidePreview() { preview.classList.remove("show"); }
+
+  // ---------------- well detail ----------------
+
+  async function openWell(treatment, replicate) {
+    stopPlay();
+    document.querySelectorAll(".thumb.selected").forEach(e => e.classList.remove("selected"));
+    document.querySelector(`.thumb[data-tx="${CSS.escape(treatment)}"][data-rep="${replicate}"]`)?.classList.add("selected");
+
+    $("well-card").hidden = false;
+    $("well-title").textContent = `${treatment} · r${replicate}`;
+    $("well-plot").innerHTML = "";
+
+    const r = await fetch(`/api/well?folder=${encodeURIComponent(currentFolder)}&treatment=${encodeURIComponent(treatment)}&replicate=${replicate}`);
+    const data = await r.json();
+    if (!r.ok) { setStatus("err", data.detail || r.statusText); return; }
+    currentWell = data;
+
+    const scrub = $("scrub");
+    scrub.min = 0; scrub.max = data.timepoints.length - 1; scrub.value = 0;
+    scrub.oninput = () => showFrame(parseInt(scrub.value));
+
+    // Pre-warm alignment (so the first aligned-frame request doesn't stall).
+    if (alignFlag()) {
+      $("viewer-stat").textContent = "computing alignment…";
+      try {
+        await fetch(`/api/well-align?folder=${encodeURIComponent(currentFolder)}&treatment=${encodeURIComponent(treatment)}&replicate=${replicate}`);
+      } catch (e) { /* fall through; aligned image requests will retry */ }
+    }
+    renderFilmstrip();
+    showFrame(0);
+    $("well-card").scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
-  // ---------------- viewer ----------------
+  function renderFilmstrip() {
+    if (!currentWell) return;
+    const a = alignFlag();
+    const fs = $("filmstrip");
+    fs.innerHTML = currentWell.timepoints.map((tp, i) =>
+      `<div class="frame" data-i="${i}" title="${tp.label}">
+         <img loading="lazy" src="${imgUrl(tp.key, 192, a)}" alt="t${i}">
+         <span class="frame-tag">${i}</span>
+       </div>`
+    ).join("");
+    fs.querySelectorAll(".frame").forEach(el => {
+      el.onclick = () => showFrame(parseInt(el.dataset.i));
+    });
+  }
 
-  async function openViewer(tx, t, key) {
-    document.querySelectorAll(".thumb.selected").forEach(e => e.classList.remove("selected"));
-    document.querySelector(`.thumb[data-key="${CSS.escape(key)}"]`)?.classList.add("selected");
+  async function showFrame(i) {
+    if (!currentWell) return;
+    const tps = currentWell.timepoints;
+    if (i < 0 || i >= tps.length) return;
+    currentTIdx = i;
+    const tp = tps[i];
+    $("scrub").value = i;
+    $("scrub-label").textContent = `${i + 1} / ${tps.length}`;
+    $("well-frame-label").textContent = `t${i} · ${tp.label}`;
 
-    $("viewer").hidden = false;
-    $("viewer-title").textContent = `${tx} · timepoint ${t} · ${key}`;
+    document.querySelectorAll("#filmstrip .frame.active").forEach(e => e.classList.remove("active"));
+    document.querySelector(`#filmstrip .frame[data-i="${i}"]`)?.classList.add("active");
+    document.querySelector(`#filmstrip .frame[data-i="${i}"]`)?.scrollIntoView({block: "nearest", inline: "center", behavior: "smooth"});
+
+    const a = alignFlag();
+    $("viewer-img").src = imgUrl(tp.key, 0, a);
+    $("layer-edges-img").src = edgesUrl(tp.key, a);
     $("viewer-stat").textContent = "loading…";
-    const img = $("viewer-img");
-    const edgesImg = $("layer-edges-img");
-    const svg = $("viewer-svg");
-    const qs = `folder=${encodeURIComponent(currentFolder)}&key=${encodeURIComponent(key)}`;
-    img.src = `/api/image?${qs}`;
-    edgesImg.src = `/api/edges?${qs}`;
 
+    const qs = `folder=${encodeURIComponent(currentFolder)}&key=${encodeURIComponent(tp.key)}${a ? "&aligned=1" : ""}`;
     try {
       const r = await fetch(`/api/overlay?${qs}`);
       const data = await r.json();
       if (!r.ok) throw new Error(data.detail || r.statusText);
-      currentOverlay = data;
-
-      svg.setAttribute("viewBox", `0 0 ${data.width} ${data.height}`);
+      $("viewer-svg").setAttribute("viewBox", `0 0 ${data.width} ${data.height}`);
       $("layer-circles").innerHTML = data.circles.map(c =>
         `<circle cx="${c.cx}" cy="${c.cy}" r="${c.r}" />`
       ).join("");
       applyToggles();
       $("viewer-stat").innerHTML = `<strong>${data.n_passed}</strong> organoids passed QC`;
-      $("viewer").scrollIntoView({ behavior: "smooth", block: "start" });
     } catch (e) {
       $("viewer-stat").textContent = String(e.message || e);
     }
   }
+
+  function startPlay() {
+    if (!currentWell) return;
+    const interval = parseInt($("speed").value);
+    $("play-btn").textContent = "❚❚";
+    playTimer = setInterval(() => {
+      const next = (currentTIdx + 1) % currentWell.timepoints.length;
+      showFrame(next);
+    }, interval);
+  }
+  function stopPlay() {
+    if (playTimer) { clearInterval(playTimer); playTimer = null; }
+    $("play-btn").textContent = "▶";
+  }
+  $("play-btn").onclick = () => { playTimer ? stopPlay() : startPlay(); };
+  $("speed").onchange = () => { if (playTimer) { stopPlay(); startPlay(); } };
+  $("well-close").onclick = () => { stopPlay(); $("well-card").hidden = true; };
 
   const applyToggles = () => {
     $("layer-edges-img").style.display = $("toggle-edges").checked ? "" : "none";
@@ -266,14 +369,53 @@
   };
   $("toggle-edges").onchange = applyToggles;
   $("toggle-circles").onchange = applyToggles;
-  $("viewer-close").onclick = () => { $("viewer").hidden = true; };
+  $("toggle-align").onchange = async () => {
+    if (!currentWell) return;
+    if (alignFlag()) {
+      $("viewer-stat").textContent = "computing alignment…";
+      try {
+        await fetch(`/api/well-align?folder=${encodeURIComponent(currentFolder)}&treatment=${encodeURIComponent(currentWell.treatment)}&replicate=${currentWell.replicate}`);
+      } catch (e) {}
+    }
+    renderFilmstrip();
+    showFrame(currentTIdx);
+  };
 
-  // ---------------- analyze ----------------
+  $("well-analyze").onclick = async () => {
+    if (!currentWell) return;
+    const { treatment, replicate } = currentWell;
+    $("well-plot").innerHTML = `<div class="loading">running pipeline on all timepoints…</div>`;
+    try {
+      const r = await fetch(`/api/well-analyze?folder=${encodeURIComponent(currentFolder)}&treatment=${encodeURIComponent(treatment)}&replicate=${replicate}`);
+      const data = await r.json();
+      $("well-plot").innerHTML = data.plot_html || `<div class="loading">no organoids passed QC</div>`;
+      $("well-plot").querySelectorAll("script").forEach(s => {
+        const n = document.createElement("script"); n.textContent = s.textContent; s.replaceWith(n);
+      });
+    } catch (e) {
+      $("well-plot").innerHTML = `<div class="loading err">${String(e)}</div>`;
+    }
+  };
+
+  // ---------------- analyze full ----------------
+
+  // ---------------- autoload default folder ----------------
+
+  (async () => {
+    try {
+      const r = await fetch("/api/default-folder");
+      const data = await r.json();
+      if (data.folder) {
+        $("folder").value = data.folder;
+        $("scan").click();
+      }
+    } catch (e) { /* no autoload */ }
+  })();
 
   $("analyze").onclick = async () => {
     if (!currentFolder) return;
     setStatus("live", "segmenting…");
-    $("analyze-status").textContent = "running pipeline on every image — this may take a moment";
+    $("analyze-status").textContent = "running pipeline on every image — this may take a while";
     $("analyze").disabled = true;
     setStep(2, "active");
     try {
@@ -282,15 +424,12 @@
       renderPills("analyze-pills", [
         ["organoids passed QC", data.n_organoids],
         ["treatments", data.treatments.length],
-        ["timepoints", data.timepoints.length],
+        ["timepoints", data.n_timepoints],
         ["median area (px)", Math.round(data.median_area_px || 0)],
       ]);
       $("plot-out").innerHTML = data.plot_html;
-      // Plotly is pre-loaded on the page; eval the inline figure script so it executes.
       $("plot-out").querySelectorAll("script").forEach((s) => {
-        const n = document.createElement("script");
-        n.textContent = s.textContent;
-        s.replaceWith(n);
+        const n = document.createElement("script"); n.textContent = s.textContent; s.replaceWith(n);
       });
       $("analyze-status").textContent = "";
       setStatus("ok", `${data.n_organoids} organoids`);

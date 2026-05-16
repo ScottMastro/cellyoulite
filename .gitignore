@@ -7,3 +7,12 @@ build/
 .pytest_cache/
 .ruff_cache/
 .DS_Store
+
+# Raw experimental data — kept locally, not in git
+/data/
+
+# Local alignment QC outputs
+/align_check/
+
+# Editor / agent state
+/.claude/

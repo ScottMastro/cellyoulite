@@ -25,6 +25,10 @@ def segment_image(
     cleanup -> connected components -> area filter. Returns a strict subset
     of objects that pass size filters; downstream QC handles shape filters.
     """
+    if image.ndim == 3:
+        # Collapse RGB(A) to greyscale. Brightfield channels are near-identical;
+        # a simple mean is fine and avoids a colour-science detour.
+        image = image[..., :3].mean(axis=-1)
     if image.ndim != 2:
         raise ValueError(f"expected 2D greyscale, got shape {image.shape}")
 
@@ -33,8 +37,8 @@ def segment_image(
     threshold = filters.threshold_otsu(inverted)
     binary = inverted > threshold
 
-    binary = morphology.remove_small_holes(binary, max_size=64)
-    binary = morphology.remove_small_objects(binary, max_size=min_area_px - 1)
+    binary = morphology.remove_small_holes(binary, 64)
+    binary = morphology.remove_small_objects(binary, min_area_px - 1)
     binary = morphology.opening(binary, morphology.disk(2))
 
     labels = measure.label(binary)
