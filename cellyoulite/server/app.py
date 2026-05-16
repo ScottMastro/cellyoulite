@@ -1,11 +1,15 @@
 from __future__ import annotations
 
-import tempfile
+import hashlib
+import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, HTTPException
+from fastapi import Body, FastAPI, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -20,10 +24,9 @@ from cellyoulite.pipeline.circle_fit import fit_circle as _fit_circle
 from cellyoulite.pipeline.qc import QCThresholds, passes_qc as _passes_qc
 from cellyoulite.pipeline.segment import segment_image as _segment
 from cellyoulite.pipeline.align import (
-    WellAlignment, compute_alignment, paste_onto_canvas,
+    WellAlignment, compute_alignment_cached, is_alignment_cached, paste_onto_canvas,
 )
 from cellyoulite.plotting.boxplot import boxplot_by_timepoint, well_lineplot
-from cellyoulite.simulator import SimConfig, generate_dataset
 
 _WEB = Path(__file__).resolve().parent.parent / "web"
 templates = Jinja2Templates(directory=str(_WEB / "templates"))
@@ -32,58 +35,117 @@ app = FastAPI(title="CellxYou Lite", version=__version__)
 app.mount("/static", StaticFiles(directory=str(_WEB / "static")), name="static")
 
 
-_align_cache: dict[tuple[str, str], WellAlignment] = {}
+# ---------------------- data folder ----------------------
+# Single rooted folder: `$CELLYOULITE_DATA` or `./data` (relative to cwd).
+# Internal "mount" abstraction is kept (so keys stay <mount_id>/<rest>) but
+# there is now only ever one mount — the data folder.
+
+def _mount_id(path: Path) -> str:
+    h = hashlib.sha1(str(path.resolve()).encode()).hexdigest()[:8]
+    return f"m_{h}"
 
 
-def _well_for_key(folder: Path, key: str):
-    """Locate the Well whose subfolder is the first segment of `key`."""
-    sub = key.split("/", 1)[0] if "/" in key else None
-    if not sub:
-        return None
-    for w in discover_grid(folder).wells:
-        if w.folder_name == sub:
-            return w
-    return None
+def _data_dir() -> Path:
+    env = os.environ.get("CELLYOULITE_DATA")
+    if env:
+        p = Path(env).expanduser()
+        if p.is_dir():
+            return p.resolve()
+    return (Path.cwd() / "data").resolve()
 
 
-def _well_alignment(folder: Path, well) -> WellAlignment:
-    cache_key = (str(folder.resolve()), well.folder_name)
-    if cache_key not in _align_cache:
-        _align_cache[cache_key] = compute_alignment([tp.path for tp in well.timepoints])
-    return _align_cache[cache_key]
+def _mounts() -> list[dict]:
+    p = _data_dir()
+    if not p.is_dir():
+        return []
+    return [{"id": _mount_id(p), "path": str(p), "alias": p.name}]
 
 
-def _read_aligned(folder: Path, key: str) -> np.ndarray:
-    """Read the image and pad it onto its well's union canvas."""
-    img = imread(_safe_image_path(str(folder), key))
-    well = _well_for_key(folder, key)
-    if well is None:
-        return img
-    align = _well_alignment(folder, well)
-    idx = next((i for i, tp in enumerate(well.timepoints) if tp.key == key), None)
-    if idx is None or not align.placements:
-        return img
-    return paste_onto_canvas(img, align.placements[idx], align.canvas_shape)
+def _mount_by_id(mid: str) -> dict:
+    for m in _mounts():
+        if m["id"] == mid:
+            return m
+    raise HTTPException(status_code=404, detail=f"no such mount: {mid}")
 
 
-def _safe_image_path(folder: str, key: str) -> Path:
-    """Resolve `folder/key` and confirm it stays inside `folder` and exists."""
-    base = Path(folder).expanduser().resolve()
-    if not base.is_dir():
-        raise HTTPException(status_code=400, detail=f"not a directory: {folder}")
-    target = (base / key).resolve()
+# ---------------------- key plumbing ----------------------
+# A "key" is "<mount_id>/<well_folder>/<filename>". The mount id is the first
+# segment; the remainder is the path within the mount.
+
+def _split_key(key: str) -> tuple[dict, str]:
+    if "/" not in key:
+        raise HTTPException(status_code=400, detail="malformed key")
+    mid, rest = key.split("/", 1)
+    return _mount_by_id(mid), rest
+
+
+def _safe_image_path(key: str) -> Path:
+    mount, rest = _split_key(key)
+    base = Path(mount["path"]).resolve()
+    target = (base / rest).resolve()
     if base not in target.parents and target != base:
-        raise HTTPException(status_code=400, detail="key escapes folder")
+        raise HTTPException(status_code=400, detail="key escapes mount")
     if not target.is_file():
         raise HTTPException(status_code=404, detail=f"no such file: {key}")
     return target
 
 
+def _wells_for_mount(mount: dict):
+    spec = discover_grid(Path(mount["path"]))
+    return spec
+
+
+def _find_well(mount_id: str, folder_name: str):
+    mount = _mount_by_id(mount_id)
+    spec = _wells_for_mount(mount)
+    for w in spec.wells:
+        if w.folder_name == folder_name:
+            return mount, w
+    raise HTTPException(status_code=404, detail="well not found")
+
+
+_align_cache: dict[tuple[str, str], WellAlignment] = {}
+
+
+def _well_alignment(mount: dict, well) -> WellAlignment:
+    cache_key = (mount["id"], well.folder_name)
+    if cache_key not in _align_cache:
+        _align_cache[cache_key] = compute_alignment_cached([tp.path for tp in well.timepoints])
+    return _align_cache[cache_key]
+
+
+def _read_aligned(key: str) -> np.ndarray:
+    """Read the image and pad it onto its well's union canvas."""
+    img = imread(_safe_image_path(key))
+    mount, rest = _split_key(key)
+    well_folder = rest.split("/", 1)[0] if "/" in rest else None
+    if not well_folder:
+        return img
+    spec = _wells_for_mount(mount)
+    well = next((w for w in spec.wells if w.folder_name == well_folder), None)
+    if well is None:
+        return img
+    align = _well_alignment(mount, well)
+    inner_key = rest  # well_folder/filename — matches Timepoint.key from grid
+    idx = next((i for i, tp in enumerate(well.timepoints) if tp.key == inner_key), None)
+    if idx is None or not align.placements:
+        return img
+    return paste_onto_canvas(img, align.placements[idx], align.canvas_shape)
+
+
+def _prefixed_key(mount: dict, inner_key: str) -> str:
+    return f"{mount['id']}/{inner_key}"
+
+
+# ---------------------- routes ----------------------
+
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request) -> HTMLResponse:
-    return templates.TemplateResponse(
+    resp = templates.TemplateResponse(
         request, "index.html", {"version": __version__}
     )
+    resp.headers["Cache-Control"] = "no-store, must-revalidate"
+    return resp
 
 
 @app.get("/api/version")
@@ -91,99 +153,107 @@ def version() -> dict:
     return {"version": __version__}
 
 
-@app.get("/api/default-folder")
-def default_folder() -> dict:
-    """Return a folder to auto-load, if one is obvious.
+@app.get("/api/data-dir")
+def data_dir() -> dict:
+    p = _data_dir()
+    return {"path": str(p), "exists": p.is_dir()}
 
-    Order: $CELLYOULITE_DATA env var, then ./data relative to cwd.
-    """
-    import os
-    candidates = []
-    env = os.environ.get("CELLYOULITE_DATA")
-    if env:
-        candidates.append(Path(env).expanduser())
-    candidates.append(Path.cwd() / "data")
-    for c in candidates:
-        if c.is_dir() and any(p.is_dir() for p in c.iterdir()):
-            return {"folder": str(c.resolve())}
-    return {"folder": None}
+
+@app.post("/api/reveal")
+def reveal() -> dict:
+    """Open the data folder in the OS file manager."""
+    p = _data_dir()
+    if not p.is_dir():
+        raise HTTPException(status_code=404, detail=f"data folder not found: {p}")
+    try:
+        if sys.platform.startswith("darwin"):
+            subprocess.Popen(["open", str(p)])
+        elif os.name == "nt":
+            os.startfile(str(p))  # type: ignore[attr-defined]
+        else:
+            subprocess.Popen(["xdg-open", str(p)])
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=500, detail=f"no file manager available: {e}")
+    return {"ok": True, "path": str(p)}
 
 
 @app.get("/api/grid")
-def grid(folder: str) -> dict:
-    """Return the well grid: one entry per (treatment, replicate)."""
-    path = Path(folder).expanduser()
-    if not path.exists() or not path.is_dir():
-        raise HTTPException(status_code=400, detail=f"not a directory: {folder}")
-    spec = discover_grid(path)
-    wells = []
-    for w in spec.wells:
-        # Thumbnail = last timepoint (max-growth frame, most informative).
-        thumb = w.timepoints[-1] if w.timepoints else None
-        wells.append({
-            "treatment": w.treatment,
-            "replicate": w.replicate,
-            "folder_name": w.folder_name,
-            "n_timepoints": len(w.timepoints),
-            "thumb_key": thumb.key if thumb else None,
-            "thumb_label": thumb.label if thumb else None,
-        })
+def grid() -> dict:
+    """Walk every mount; return wells from all of them, merged."""
+    mounts = _mounts()
+    if not mounts:
+        return {"treatments": [], "replicates": [], "n_wells": 0, "n_images": 0,
+                "wells": [], "mounts": []}
+
+    wells: list[dict] = []
+    treatments: set[str] = set()
+    replicates: set[int] = set()
+    n_images = 0
+    for mount in mounts:
+        spec = _wells_for_mount(mount)
+        treatments.update(spec.treatments)
+        replicates.update(spec.replicates)
+        n_images += spec.n_images
+        for w in spec.wells:
+            thumb = w.timepoints[-1] if w.timepoints else None
+            wells.append({
+                "mount_id": mount["id"],
+                "mount_alias": mount["alias"],
+                "treatment": w.treatment,
+                "replicate": w.replicate,
+                "folder_name": w.folder_name,
+                "n_timepoints": len(w.timepoints),
+                "thumb_key": _prefixed_key(mount, thumb.key) if thumb else None,
+                "thumb_label": thumb.label if thumb else None,
+            })
+
     return {
-        "treatments": spec.treatments,
-        "replicates": spec.replicates,
-        "n_wells": len(spec.wells),
-        "n_images": spec.n_images,
+        "treatments": sorted(treatments),
+        "replicates": sorted(replicates),
+        "n_wells": len(wells),
+        "n_images": n_images,
         "wells": wells,
+        "mounts": mounts,
     }
 
 
 @app.get("/api/well")
-def well(folder: str, treatment: str, replicate: int) -> dict:
-    """Return the ordered timepoint list for a single well."""
-    spec = discover_grid(Path(folder).expanduser())
-    for w in spec.wells:
-        if w.treatment == treatment and w.replicate == replicate:
-            return {
-                "treatment": w.treatment,
-                "replicate": w.replicate,
-                "folder_name": w.folder_name,
-                "timepoints": [
-                    {"t_idx": i, "minutes": tp.minutes, "label": tp.label, "key": tp.key}
-                    for i, tp in enumerate(w.timepoints)
-                ],
-            }
-    raise HTTPException(status_code=404, detail="well not found")
-
-
-@app.post("/api/simulate")
-def simulate() -> dict:
-    out = Path(tempfile.gettempdir()) / "cellyoulite-sim"
-    generate_dataset(out, SimConfig())
-    n_files = sum(1 for p in out.rglob("*") if p.is_file())
-    return {"folder": str(out), "n_files": n_files}
+def well(mount_id: str, folder_name: str) -> dict:
+    mount, w = _find_well(mount_id, folder_name)
+    return {
+        "mount_id": mount["id"],
+        "mount_alias": mount["alias"],
+        "treatment": w.treatment,
+        "replicate": w.replicate,
+        "folder_name": w.folder_name,
+        "timepoints": [
+            {"t_idx": i, "minutes": tp.minutes, "label": tp.label,
+             "key": _prefixed_key(mount, tp.key)}
+            for i, tp in enumerate(w.timepoints)
+        ],
+    }
 
 
 _BROWSER_NATIVE = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 
 
 @app.get("/api/image")
-def image(folder: str, key: str, thumb: int = 0, aligned: int = 0) -> Response:
+def image(key: str, thumb: int = 0, aligned: int = 0) -> Response:
     """Serve an image. TIFFs (and any non-browser-native format) are
     re-encoded to JPEG. `thumb=<px>` downscales the longest side.
     `aligned=1` pads the frame onto its well's registered canvas."""
-    path = _safe_image_path(folder, key)
+    path = _safe_image_path(key)
     if path.suffix.lower() in _BROWSER_NATIVE and not thumb and not aligned:
         return FileResponse(path)
 
     if aligned:
-        img = _read_aligned(Path(folder).expanduser(), key)
+        img = _read_aligned(key)
     else:
         img = imread(path)
     if img.ndim == 2:
         img = np.stack([img, img, img], axis=-1)
     if img.dtype != np.uint8:
         img = np.clip(img, 0, 255).astype(np.uint8)
-    # skimage delivers RGB; cv2 wants BGR.
     bgr = cv2.cvtColor(img[..., :3], cv2.COLOR_RGB2BGR)
 
     if thumb and thumb > 0:
@@ -200,11 +270,8 @@ def image(folder: str, key: str, thumb: int = 0, aligned: int = 0) -> Response:
 
 
 @app.get("/api/overlay")
-def overlay(folder: str, key: str, aligned: int = 0) -> dict:
-    if aligned:
-        img = _read_aligned(Path(folder).expanduser(), key)
-    else:
-        img = imread(_safe_image_path(folder, key))
+def overlay(key: str, aligned: int = 0) -> dict:
+    img = _read_aligned(key) if aligned else imread(_safe_image_path(key))
     seg = segment_image(img)
 
     circles: list[dict] = []
@@ -221,11 +288,8 @@ def overlay(folder: str, key: str, aligned: int = 0) -> dict:
 
 
 @app.get("/api/edges")
-def edges(folder: str, key: str, aligned: int = 0) -> Response:
-    if aligned:
-        img = _read_aligned(Path(folder).expanduser(), key)
-    else:
-        img = imread(_safe_image_path(folder, key))
+def edges(key: str, aligned: int = 0) -> Response:
+    img = _read_aligned(key) if aligned else imread(_safe_image_path(key))
     seg = segment_image(img)
 
     qc_mask = np.zeros_like(seg.mask, dtype=bool)
@@ -244,34 +308,24 @@ def edges(folder: str, key: str, aligned: int = 0) -> Response:
 
 
 @app.get("/api/well-align")
-def well_align(folder: str, treatment: str, replicate: int) -> dict:
-    """Compute (or fetch cached) phase-correlation alignment for one well."""
-    root = Path(folder).expanduser()
-    well = next((w for w in discover_grid(root).wells
-                 if w.treatment == treatment and w.replicate == replicate), None)
-    if well is None:
-        raise HTTPException(status_code=404, detail="well not found")
-    align = _well_alignment(root, well)
+def well_align(mount_id: str, folder_name: str) -> dict:
+    mount, w = _find_well(mount_id, folder_name)
+    align = _well_alignment(mount, w)
     return {
-        "canvas": list(align.canvas_shape),       # [H, W]
+        "canvas": list(align.canvas_shape),
         "offsets": [list(o) for o in align.offsets],
         "placements": [list(p) for p in align.placements],
     }
 
 
 @app.get("/api/well-analyze")
-def well_analyze(folder: str, treatment: str, replicate: int) -> JSONResponse:
-    """Run the pipeline on a single well's timeseries and return a line plot."""
+def well_analyze(mount_id: str, folder_name: str) -> JSONResponse:
     import pandas as pd
-    spec = discover_grid(Path(folder).expanduser())
-    well = next((w for w in spec.wells
-                 if w.treatment == treatment and w.replicate == replicate), None)
-    if well is None:
-        raise HTTPException(status_code=404, detail="well not found")
+    _, w = _find_well(mount_id, folder_name)
 
     qc = QCThresholds()
     rows: list[dict] = []
-    for t_idx, tp in enumerate(well.timepoints):
+    for t_idx, tp in enumerate(w.timepoints):
         img = imread(tp.path)
         seg = _segment(img, min_area_px=qc.min_area_px, max_area_px=qc.max_area_px)
         for idx, region in enumerate(seg.regions):
@@ -294,11 +348,16 @@ def well_analyze(folder: str, treatment: str, replicate: int) -> JSONResponse:
 
 
 @app.get("/api/analyze")
-def analyze(folder: str) -> JSONResponse:
-    path = Path(folder).expanduser()
-    if not path.exists() or not path.is_dir():
-        raise HTTPException(status_code=400, detail=f"not a directory: {folder}")
-    df = analyze_folder(path)
+def analyze() -> JSONResponse:
+    import pandas as pd
+    frames = []
+    for mount in _mounts():
+        df = analyze_folder(Path(mount["path"]))
+        if len(df):
+            df = df.copy()
+            df["mount"] = mount["alias"]
+            frames.append(df)
+    df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     plot_html = boxplot_by_timepoint(df) if len(df) else ""
     return JSONResponse({
         "n_organoids": int(len(df)),
@@ -308,6 +367,107 @@ def analyze(folder: str) -> JSONResponse:
         "plot_html": plot_html,
         "rows": df.head(20).to_dict(orient="records"),
     })
+
+
+# ---------------------- alignment warm-up ----------------------
+
+@app.post("/api/warm-alignments")
+def warm_alignments() -> dict:
+    """Walk every well in every mount; for each, ensure an up-to-date
+    alignment cache file exists on disk. Already-cached wells are O(1)
+    (just a file-exists check on the fingerprinted path)."""
+    import time
+    out: list[dict] = []
+    n_recomputed = 0
+    for mount in _mounts():
+        try:
+            spec = _wells_for_mount(mount)
+        except Exception as e:  # noqa: BLE001
+            out.append({"mount": mount["alias"], "error": str(e)})
+            continue
+        for w in spec.wells:
+            paths = [tp.path for tp in w.timepoints]
+            cached = is_alignment_cached(paths)
+            t0 = time.perf_counter()
+            align = compute_alignment_cached(paths)
+            elapsed_ms = int((time.perf_counter() - t0) * 1000)
+            _align_cache[(mount["id"], w.folder_name)] = align
+            if not cached:
+                n_recomputed += 1
+            out.append({
+                "mount": mount["alias"],
+                "well": w.folder_name,
+                "n_timepoints": len(paths),
+                "was_cached": cached,
+                "ms": elapsed_ms,
+            })
+    return {"n_wells": len(out), "n_recomputed": n_recomputed, "wells": out}
+
+
+# ---------------------- annotation tool ----------------------
+
+_ANN_ROOT = Path.cwd() / "annotations"
+
+
+def _ann_dir(well: str) -> Path:
+    safe_well = well.replace("/", "_")
+    p = _ANN_ROOT / safe_well
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _ann_path(well: str, label: str) -> Path:
+    safe_label = label.replace("/", "_")
+    return _ann_dir(well) / f"{safe_label}.json"
+
+
+@app.get("/annotate", response_class=HTMLResponse)
+def annotate_page(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request, "annotate.html", {"version": __version__}
+    )
+
+
+@app.get("/api/annotations")
+def get_annotations(well: str, label: str) -> dict:
+    path = _ann_path(well, label)
+    if not path.is_file():
+        return {"circles": [], "exists": False}
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {"circles": [], "exists": False}
+    return {"circles": data.get("circles", []), "exists": True,
+            "meta": {k: v for k, v in data.items() if k != "circles"}}
+
+
+@app.post("/api/annotations")
+def save_annotations(well: str, label: str, aligned: int = 0,
+                     body: dict = Body(...)) -> dict:
+    circles = body.get("circles", [])
+    # Normalise + validate.
+    clean: list[dict] = []
+    for c in circles:
+        try:
+            clean.append({
+                "cx": float(c["cx"]),
+                "cy": float(c["cy"]),
+                "r": float(c["r"]),
+                "star": bool(c.get("star", False)),
+            })
+        except (KeyError, TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="bad circle in payload")
+    payload = {
+        "well": well,
+        "label": label,
+        "aligned": bool(aligned),
+        "key": body.get("key"),
+        "image_w": body.get("image_w"),
+        "image_h": body.get("image_h"),
+        "circles": clean,
+    }
+    _ann_path(well, label).write_text(json.dumps(payload, indent=2))
+    return {"ok": True, "n": len(clean)}
 
 
 @app.get("/healthz")

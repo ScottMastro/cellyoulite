@@ -5,6 +5,8 @@ import threading
 import time
 import webbrowser
 
+from pathlib import Path
+
 import uvicorn
 
 from cellyoulite.__version__ import __version__
@@ -44,6 +46,10 @@ def main() -> None:
         print(df.head().to_string())
         print(f"\n{len(df)} organoids passed QC")
         return
+
+    if args.folder:
+        import os
+        os.environ["CELLYOULITE_DATA"] = str(Path(args.folder).expanduser().resolve())
 
     url = f"http://{args.host}:{args.port}"
     if not args.no_browser:

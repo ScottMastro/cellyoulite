@@ -14,5 +14,8 @@ build/
 # Local alignment QC outputs
 /align_check/
 
+# On-disk alignment cache (regenerated on demand from data/)
+/.align_cache/
+
 # Editor / agent state
 /.claude/

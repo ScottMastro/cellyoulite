@@ -21,7 +21,7 @@ from skimage.io import imread
 from skimage.transform import resize
 
 from cellyoulite.io.grid import discover_grid
-from cellyoulite.pipeline.align import compute_alignment, paste_onto_canvas
+from cellyoulite.pipeline.align import compute_alignment_cached as compute_alignment, paste_onto_canvas
 
 
 def _to_rgb_u8(img: np.ndarray) -> np.ndarray:

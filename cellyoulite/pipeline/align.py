@@ -13,6 +13,8 @@ scale-bar in the corners, then take the central 60% to be extra-safe.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -133,6 +135,77 @@ def compute_alignment(paths: list[Path]) -> WellAlignment:
     canvas_w = w + (dx_max - dx_min)
     placements = tuple(((dy_max - dy), (dx_max - dx)) for dy, dx in offsets)
     return WellAlignment(tuple(offsets), placements, (canvas_h, canvas_w))
+
+
+_CACHE_DIR = Path.cwd() / ".align_cache"
+_CACHE_VERSION = 2  # bump to invalidate when the algorithm changes
+
+
+def _fingerprint(paths: list[Path]) -> str:
+    """Stable hash of (path, mtime_ns, size) for every input file. Any change
+    to any timepoint invalidates the cache for that well."""
+    h = hashlib.sha1()
+    h.update(f"v{_CACHE_VERSION}\n".encode())
+    for p in paths:
+        st = p.stat()
+        h.update(f"{p}\n{st.st_mtime_ns}\n{st.st_size}\n".encode())
+    return h.hexdigest()[:16]
+
+
+def _cache_path(paths: list[Path]) -> Path:
+    fp = _fingerprint(paths)
+    # First path's parent name is the well folder — handy for human-grepping.
+    well_hint = paths[0].parent.name.replace("/", "_").replace(" ", "_")
+    return _CACHE_DIR / f"{well_hint}__{fp}.json"
+
+
+def _load_cached(paths: list[Path]) -> WellAlignment | None:
+    if not paths:
+        return None
+    cp = _cache_path(paths)
+    if not cp.is_file():
+        return None
+    try:
+        data = json.loads(cp.read_text())
+    except (OSError, ValueError):
+        return None
+    return WellAlignment(
+        offsets=tuple(tuple(o) for o in data["offsets"]),
+        placements=tuple(tuple(p) for p in data["placements"]),
+        canvas_shape=tuple(data["canvas_shape"]),
+    )
+
+
+def _save_cached(paths: list[Path], align: WellAlignment) -> None:
+    if not paths:
+        return
+    _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    _cache_path(paths).write_text(json.dumps({
+        "offsets": [list(o) for o in align.offsets],
+        "placements": [list(p) for p in align.placements],
+        "canvas_shape": list(align.canvas_shape),
+    }))
+
+
+def is_alignment_cached(paths: list[Path]) -> bool:
+    """True iff a cache file matching the current fingerprint is on disk."""
+    if not paths:
+        return True
+    return _cache_path(paths).is_file()
+
+
+def compute_alignment_cached(paths: list[Path]) -> WellAlignment:
+    """Disk-cached wrapper around compute_alignment. Cache invalidates on any
+    file mtime/size change in the well, and on _CACHE_VERSION bumps."""
+    hit = _load_cached(paths)
+    if hit is not None:
+        return hit
+    align = compute_alignment(paths)
+    try:
+        _save_cached(paths, align)
+    except OSError:
+        pass  # cache is a best-effort optimisation; don't break callers
+    return align
 
 
 def paste_onto_canvas(img: np.ndarray, placement: tuple[int, int],
