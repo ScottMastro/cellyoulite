@@ -142,13 +142,15 @@ _CACHE_VERSION = 2  # bump to invalidate when the algorithm changes
 
 
 def _fingerprint(paths: list[Path]) -> str:
-    """Stable hash of (path, mtime_ns, size) for every input file. Any change
-    to any timepoint invalidates the cache for that well."""
+    """Stable hash of (path, mtime_ns, size) for every input file. The path
+    is canonicalised to its absolute form so callers passing the same files
+    via relative vs absolute Path produce the same cache entry."""
     h = hashlib.sha1()
     h.update(f"v{_CACHE_VERSION}\n".encode())
     for p in paths:
         st = p.stat()
-        h.update(f"{p}\n{st.st_mtime_ns}\n{st.st_size}\n".encode())
+        canonical = str(p.resolve())
+        h.update(f"{canonical}\n{st.st_mtime_ns}\n{st.st_size}\n".encode())
     return h.hexdigest()[:16]
 
 

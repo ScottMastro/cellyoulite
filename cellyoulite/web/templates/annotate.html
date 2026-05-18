@@ -33,6 +33,9 @@
   <select id="well-sel"></select>
   <select id="tp-sel"></select>
   <label class="hint"><input type="checkbox" id="aligned" checked> aligned</label>
+  <select id="copy-from" title="copy circles from another timepoint">
+    <option value="">copy from…</option>
+  </select>
   <button id="clear">clear all</button>
   <span id="status" class="status">—</span>
 </header>
@@ -56,6 +59,7 @@ const wellSel = document.getElementById('well-sel');
 const tpSel = document.getElementById('tp-sel');
 const alignedBox = document.getElementById('aligned');
 const clearBtn = document.getElementById('clear');
+const copyFromSel = document.getElementById('copy-from');
 const statusEl = document.getElementById('status');
 const img = document.getElementById('img');
 const canvas = document.getElementById('canvas');
@@ -124,7 +128,20 @@ async function loadWell() {
     opt.textContent = `t${String(tp.t_idx).padStart(2,'0')} · ${tp.label}`;
     tpSel.appendChild(opt);
   }
+  populateCopyFrom();
   if (timepoints.length) loadFrame();
+}
+
+function populateCopyFrom() {
+  // Mirror the timepoint list (excluding the current one when loadFrame runs).
+  copyFromSel.innerHTML = '<option value="">copy from…</option>';
+  for (const tp of timepoints) {
+    const opt = document.createElement('option');
+    opt.value = tp.key;
+    opt.dataset.label = tp.label;
+    opt.textContent = `t${String(tp.t_idx).padStart(2,'0')} · ${tp.label}`;
+    copyFromSel.appendChild(opt);
+  }
 }
 
 async function loadFrame() {
@@ -325,6 +342,30 @@ function draw() {
 wellSel.addEventListener('change', loadWell);
 tpSel.addEventListener('change', loadFrame);
 alignedBox.addEventListener('change', loadFrame);
+copyFromSel.addEventListener('change', async () => {
+  const opt = copyFromSel.options[copyFromSel.selectedIndex];
+  const srcKey = opt.value;
+  if (!srcKey) return;
+  if (srcKey === currentKey) {
+    copyFromSel.value = '';
+    return;
+  }
+  if (circles.length && !confirm(`Replace current ${circles.length} circle(s) with those from t${opt.dataset.label}?`)) {
+    copyFromSel.value = '';
+    return;
+  }
+  const wopt = wellSel.options[wellSel.selectedIndex];
+  const r = await fetch(`/api/annotations?well=${encodeURIComponent(wopt.textContent)}&label=${encodeURIComponent(opt.dataset.label)}`);
+  const data = await r.json();
+  const incoming = data.circles || [];
+  // Deep copy so editing the new ones doesn't write through to anything.
+  circles = incoming.map(c => ({cx: c.cx, cy: c.cy, r: c.r, star: !!c.star}));
+  selectedIdx = -1;
+  setStatus(`copied ${circles.length} from t${opt.dataset.label}`, circles.length > 0);
+  copyFromSel.value = '';
+  draw();
+});
+
 clearBtn.addEventListener('click', () => {
   if (!circles.length) return;
   if (!confirm('clear all circles on this frame?')) return;

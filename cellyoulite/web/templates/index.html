@@ -39,6 +39,18 @@
     </div>
     <p class="hint">Each experiment is a subfolder named <code>&lt;treatment&gt; r&lt;replicate&gt;</code>. Add or edit folders, then hit Refresh.</p>
     <div class="pills" id="grid-pills" hidden></div>
+
+    <div class="cellpose-bar" id="cellpose-bar">
+      <div class="cellpose-bar-head">
+        <button id="cp-run"    class="primary">Run Cellpose on all</button>
+        <button id="cp-cancel" class="ghost" hidden>Cancel</button>
+        <span id="cp-summary" class="hint">—</span>
+      </div>
+      <div class="progress" id="cp-progress" hidden>
+        <div class="progress-fill" id="cp-progress-fill"></div>
+      </div>
+      <div id="cp-last-line" class="mono small hint"></div>
+    </div>
   </section>
 
   <section class="card" id="grid-card" hidden>
@@ -49,7 +61,7 @@
   </section>
 
   <section class="card" id="well-card" hidden>
-    <h2 id="well-title">Well · timeseries</h2>
+    <h2 id="well-title">Well · timeseries <span id="well-cp-status" class="cp-status-inline"></span></h2>
 
     <div class="viewer">
       <div class="viewer-toolbar">
@@ -61,6 +73,8 @@
           <span class="swatch swatch-edges"></span> pixel edges</label>
         <label class="toggle"><input type="checkbox" id="toggle-circles" checked>
           <span class="swatch swatch-circles"></span> best-fit circles</label>
+        <label class="toggle"><input type="checkbox" id="toggle-cellpose" checked>
+          <span class="swatch swatch-cellpose"></span> cellpose</label>
         <span id="viewer-stat" class="pill"></span>
         <button id="well-close" class="ghost">close</button>
       </div>
@@ -71,6 +85,7 @@
           <img id="layer-edges-img" class="overlay" alt="">
           <svg id="viewer-svg" class="overlay" preserveAspectRatio="none">
             <g id="layer-circles"></g>
+            <g id="layer-cellpose"></g>
           </svg>
         </div>
       </div>
@@ -129,6 +144,8 @@
   let currentGrid = null;
   let currentWell = null;        // {mount_id, mount_alias, treatment, replicate, folder_name, timepoints}
   let currentTIdx = 0;
+  // Cellpose cache status per well: folder_name -> {n_total, n_done, labels_done: Set<string>}
+  let cellposeStatus = new Map();
   let playTimer = null;
 
   const setStatus = (cls, text) => {
@@ -160,8 +177,112 @@
       const data = await r.json();
       $("data-path").textContent = data.path;
     } catch (e) {}
+    await refreshCellposeStatus();
     await refreshGrid();
   }
+
+  async function refreshCellposeStatus() {
+    try {
+      const r = await fetch("/api/cellpose-status");
+      if (!r.ok) return false;
+      const data = await r.json();
+      // Detect whether anything changed before re-rendering.
+      let changed = false;
+      const next = new Map();
+      for (const w of (data.wells || [])) {
+        const prev = cellposeStatus.get(w.folder_name);
+        if (!prev || prev.n_done !== w.n_done || prev.n_total !== w.n_total) {
+          changed = true;
+        }
+        next.set(w.folder_name, {
+          n_total: w.n_total,
+          n_done: w.n_done,
+          labels_done: new Set(w.labels_done || []),
+        });
+      }
+      if (cellposeStatus.size !== next.size) changed = true;
+      cellposeStatus = next;
+      return changed;
+    } catch (e) { return false; }
+  }
+
+  // Combined poll: cellpose cache state + job status, every 2s while a job
+  // is running; every 5s otherwise.
+  let cpPollMs = 5000;
+  async function cellposePoll() {
+    const changed = await refreshCellposeStatus();
+    if (changed) {
+      if (currentGrid) renderThumbGrid(currentGrid);
+      if (currentWell) { renderFilmstrip(); updateWellCpStatus(); }
+    }
+    try {
+      const r = await fetch("/api/cellpose-job");
+      if (r.ok) {
+        const job = await r.json();
+        updateCellposeBar(job);
+        cpPollMs = job.running ? 2000 : 5000;
+      }
+    } catch (e) {}
+    setTimeout(cellposePoll, cpPollMs);
+  }
+  setTimeout(cellposePoll, 1500);
+
+  function updateCellposeBar(job) {
+    let nDone = 0, nTotal = 0;
+    for (const st of cellposeStatus.values()) { nDone += st.n_done; nTotal += st.n_total; }
+    const pct = nTotal ? Math.round(100 * nDone / nTotal) : 0;
+    $("cp-progress").hidden = nTotal === 0;
+    $("cp-progress-fill").style.width = `${pct}%`;
+    $("cp-progress-fill").classList.toggle("running", job.running);
+
+    const runBtn = $("cp-run"), cancelBtn = $("cp-cancel");
+    if (job.running) {
+      runBtn.disabled = true;
+      runBtn.textContent = "Running…";
+      cancelBtn.hidden = false;
+    } else {
+      runBtn.disabled = false;
+      runBtn.textContent = nDone >= nTotal && nTotal > 0
+        ? "Re-run Cellpose (cached)" : "Run Cellpose on all";
+      cancelBtn.hidden = true;
+    }
+    const eta = etaFromJob(job, nDone, nTotal);
+    $("cp-summary").textContent =
+      `${nDone}/${nTotal} processed (${pct}%)`
+      + (job.running ? ` · running · ${eta}` : "");
+    $("cp-last-line").textContent = job.running ? (job.last_line || "") : "";
+  }
+
+  function etaFromJob(job, nDone, nTotal) {
+    if (!job.started_at || !job.running) return "";
+    const elapsed = Math.max(1, Date.now() / 1000 - job.started_at);
+    // crude: assume ~uniform per-frame rate from when this run started
+    const lastNum = (job.last_line || "").match(/\[\s*(\d+)\/\s*(\d+)\]/);
+    if (!lastNum) return "starting…";
+    const i = parseInt(lastNum[1]), total = parseInt(lastNum[2]);
+    if (i <= 0 || total <= 0) return "";
+    const perFrame = elapsed / i;
+    const remaining = Math.round(perFrame * (total - i));
+    const mm = String(Math.floor(remaining / 60)).padStart(2, "0");
+    const ss = String(remaining % 60).padStart(2, "0");
+    return `ETA ${mm}:${ss}`;
+  }
+
+  $("cp-run").onclick = async () => {
+    $("cp-run").disabled = true;
+    try {
+      const r = await fetch("/api/cellpose-run", { method: "POST" });
+      if (!r.ok) { setStatus("err", `cellpose-run: ${r.statusText}`); }
+    } catch (e) { setStatus("err", String(e)); }
+  };
+  $("cp-cancel").onclick = async () => {
+    $("cp-cancel").disabled = true;
+    try {
+      await fetch("/api/cellpose-cancel", { method: "POST" });
+    } finally {
+      $("cp-cancel").disabled = false;
+    }
+  };
 
   $("refresh").onclick = () => refreshAll();
   $("reveal").onclick = async () => {
@@ -233,6 +354,14 @@
         if (!w || !w.thumb_key) {
           html += `<div class="thumb empty"></div>`;
         } else {
+          const st = cellposeStatus.get(w.folder_name);
+          let badge = "";
+          if (st) {
+            const cls = st.n_done === 0 ? "todo"
+                       : st.n_done < st.n_total ? "partial"
+                       : "done";
+            badge = `<span class="cp-badge ${cls}" title="${st.n_done}/${st.n_total} Cellpose-processed">${st.n_done}/${st.n_total}</span>`;
+          }
           html += `<div class="thumb"
                         data-mount="${w.mount_id}"
                         data-folder-name="${w.folder_name}"
@@ -241,6 +370,7 @@
                         data-key="${w.thumb_key}">
                      <img loading="lazy" src="${imgUrl(w.thumb_key, 128)}" alt="${treatment} r${r}">
                      <span class="thumb-tag">r${r}</span>
+                     ${badge}
                    </div>`;
         }
       }
@@ -296,7 +426,8 @@
     const data = await r.json();
     if (!r.ok) { setStatus("err", data.detail || r.statusText); return; }
     currentWell = data;
-    $("well-title").textContent = `${data.treatment} · r${data.replicate}`;
+    $("well-title").innerHTML = `${data.treatment} · r${data.replicate} <span id="well-cp-status" class="cp-status-inline"></span>`;
+    updateWellCpStatus();
 
     const scrub = $("scrub");
     scrub.min = 0; scrub.max = data.timepoints.length - 1; scrub.value = 0;
@@ -311,16 +442,30 @@
     $("well-card").scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
+  function updateWellCpStatus() {
+    const el = $("well-cp-status");
+    if (!el || !currentWell) return;
+    const st = cellposeStatus.get(currentWell.folder_name);
+    if (!st) { el.textContent = ""; return; }
+    const cls = st.n_done === 0 ? "todo" : st.n_done < st.n_total ? "partial" : "done";
+    el.className = `cp-status-inline ${cls}`;
+    el.textContent = `cellpose ${st.n_done}/${st.n_total}`;
+  }
+
   function renderFilmstrip() {
     if (!currentWell) return;
     const a = alignFlag();
     const fs = $("filmstrip");
-    fs.innerHTML = currentWell.timepoints.map((tp, i) =>
-      `<div class="frame" data-i="${i}" title="${tp.label}">
+    const st = cellposeStatus.get(currentWell.folder_name);
+    const labelsDone = st ? st.labels_done : new Set();
+    fs.innerHTML = currentWell.timepoints.map((tp, i) => {
+      const done = labelsDone.has(tp.label);
+      return `<div class="frame ${done ? 'cp-done' : 'cp-todo'}" data-i="${i}" title="${tp.label}${done ? ' · cellpose ✓' : ' · cellpose pending'}">
          <img loading="lazy" src="${imgUrl(tp.key, 192, a)}" alt="t${i}">
          <span class="frame-tag">${i}</span>
-       </div>`
-    ).join("");
+         <span class="frame-cp-dot"></span>
+       </div>`;
+    }).join("");
     fs.querySelectorAll(".frame").forEach(el => {
       el.onclick = () => showFrame(parseInt(el.dataset.i));
     });
@@ -370,6 +515,23 @@
     } catch (e) {
       $("viewer-stat").textContent = String(e.message || e);
     }
+
+    // Cellpose overlay (independent fetch; absent if frame not yet processed).
+    try {
+      const cpKey = `key=${encodeURIComponent(tp.key)}`;
+      const r2 = await fetch(`/api/cellpose-circles?${cpKey}`);
+      const d2 = await r2.json();
+      if (r2.ok && d2.cached) {
+        $("layer-cellpose").innerHTML = d2.circles.map(c =>
+          `<circle cx="${c.cx}" cy="${c.cy}" r="${c.r}" />`
+        ).join("");
+      } else {
+        $("layer-cellpose").innerHTML = "";
+      }
+      applyToggles();
+    } catch (e) {
+      $("layer-cellpose").innerHTML = "";
+    }
   }
 
   function startPlay() {
@@ -392,9 +554,11 @@
   const applyToggles = () => {
     $("layer-edges-img").style.display = $("toggle-edges").checked ? "" : "none";
     $("layer-circles").style.display = $("toggle-circles").checked ? "" : "none";
+    $("layer-cellpose").style.display = $("toggle-cellpose").checked ? "" : "none";
   };
   $("toggle-edges").onchange = applyToggles;
   $("toggle-circles").onchange = applyToggles;
+  $("toggle-cellpose").onchange = applyToggles;
   $("toggle-align").onchange = async () => {
     if (!currentWell) return;
     if (alignFlag()) {

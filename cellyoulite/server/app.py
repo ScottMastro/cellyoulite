@@ -404,6 +404,292 @@ def warm_alignments() -> dict:
     return {"n_wells": len(out), "n_recomputed": n_recomputed, "wells": out}
 
 
+# ---------------------- cellpose cache status ----------------------
+
+_CELLPOSE_CACHE_ROOT = Path.cwd() / ".cellpose_cache"
+
+
+def _cellpose_done_labels(well_folder: str) -> set[str]:
+    safe = well_folder.replace("/", "_")
+    d = _CELLPOSE_CACHE_ROOT / safe
+    if not d.is_dir():
+        return set()
+    return {p.stem for p in d.glob("*.json")}
+
+
+# ---------------------- cellpose run / cancel ----------------------
+
+import subprocess
+import sys
+import threading
+import time as _time
+
+_cellpose_job: dict = {
+    "proc": None,         # type: subprocess.Popen | None
+    "started_at": None,   # epoch seconds
+    "stopped_at": None,
+    "returncode": None,
+    "last_log": [],       # last ~30 lines of stdout, for the UI
+    "last_line": "",
+}
+_cellpose_lock = threading.Lock()
+
+
+def _reader_thread(proc):
+    """Drain the subprocess stdout into _cellpose_job['last_log'] so the UI
+    can show the most recent line and a small tail buffer."""
+    for raw in iter(proc.stdout.readline, b""):
+        line = raw.decode(errors="replace").rstrip()
+        if not line:
+            continue
+        with _cellpose_lock:
+            _cellpose_job["last_line"] = line
+            _cellpose_job["last_log"].append(line)
+            if len(_cellpose_job["last_log"]) > 30:
+                _cellpose_job["last_log"].pop(0)
+    proc.stdout.close()
+    proc.wait()
+    with _cellpose_lock:
+        _cellpose_job["returncode"] = proc.returncode
+        _cellpose_job["stopped_at"] = _time.time()
+
+
+@app.post("/api/cellpose-run")
+def cellpose_run(gpu: bool = True, workers: int = 4, force: bool = False) -> dict:
+    """Kick off the cellpose batch as a subprocess. Returns immediately;
+    the UI polls /api/cellpose-job for progress."""
+    with _cellpose_lock:
+        proc = _cellpose_job["proc"]
+        if proc is not None and proc.poll() is None:
+            return {"started": False, "running": True,
+                    "pid": proc.pid, "reason": "already running"}
+
+        cmd = [sys.executable, "-u", "scripts/cellpose_batch.py"]
+        if gpu:
+            cmd.append("--gpu")
+        else:
+            cmd += ["--workers", str(workers)]
+        if force:
+            cmd.append("--force")
+        try:
+            proc = subprocess.Popen(
+                cmd, cwd=str(Path.cwd()),
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                bufsize=1,
+            )
+        except OSError as e:
+            raise HTTPException(status_code=500, detail=f"spawn failed: {e}")
+        _cellpose_job.update({
+            "proc": proc, "started_at": _time.time(),
+            "stopped_at": None, "returncode": None,
+            "last_log": [], "last_line": "starting…",
+        })
+        threading.Thread(target=_reader_thread, args=(proc,), daemon=True).start()
+        return {"started": True, "running": True, "pid": proc.pid,
+                "cmd": " ".join(cmd)}
+
+
+@app.post("/api/cellpose-cancel")
+def cellpose_cancel() -> dict:
+    with _cellpose_lock:
+        proc = _cellpose_job["proc"]
+        if proc is None or proc.poll() is not None:
+            return {"running": False, "stopped": False}
+        try:
+            proc.terminate()
+        except OSError:
+            pass
+    return {"running": False, "stopped": True}
+
+
+@app.get("/api/cellpose-job")
+def cellpose_job() -> dict:
+    with _cellpose_lock:
+        proc = _cellpose_job["proc"]
+        running = bool(proc and proc.poll() is None)
+        return {
+            "running": running,
+            "pid": proc.pid if proc else None,
+            "started_at": _cellpose_job["started_at"],
+            "stopped_at": _cellpose_job["stopped_at"],
+            "returncode": _cellpose_job["returncode"],
+            "last_line": _cellpose_job["last_line"],
+            "last_log": list(_cellpose_job["last_log"]),
+        }
+
+
+@app.get("/api/cellpose-circles")
+def cellpose_circles(key: str) -> dict:
+    """Return cached Cellpose circles for one frame. Coordinates are in the
+    aligned-canvas space (which matches what /api/image?aligned=1 serves)."""
+    mount, rest = _split_key(key)
+    parts = rest.split("/", 1)
+    if len(parts) != 2:
+        raise HTTPException(status_code=400, detail="bad key")
+    well_folder, filename = parts
+    spec = _wells_for_mount(mount)
+    well = next((w for w in spec.wells if w.folder_name == well_folder), None)
+    if well is None:
+        raise HTTPException(status_code=404, detail="well not found")
+    tp = next((t for t in well.timepoints if t.path.name == filename), None)
+    if tp is None:
+        raise HTTPException(status_code=404, detail="timepoint not found")
+    safe_well = well_folder.replace("/", "_")
+    path = _CELLPOSE_CACHE_ROOT / safe_well / f"{tp.label}.json"
+    if not path.is_file():
+        return {"cached": False, "circles": []}
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {"cached": False, "circles": []}
+    align = _well_alignment(mount, well)
+    h, w = align.canvas_shape if align.canvas_shape else (0, 0)
+    return {
+        "cached": True,
+        "model": data.get("model", "cpsam"),
+        "circles": data.get("circles", []),
+        "width": int(w),
+        "height": int(h),
+    }
+
+
+@app.get("/api/cellpose-status")
+def cellpose_status() -> dict:
+    """Per-well counts of how many timepoints have a Cellpose cache file on
+    disk. The viewer uses this to draw 'X/Y processed' badges."""
+    rows = []
+    n_total_all = 0
+    n_done_all = 0
+    for mount in _mounts():
+        try:
+            spec = _wells_for_mount(mount)
+        except Exception:  # noqa: BLE001
+            continue
+        for w in spec.wells:
+            done = _cellpose_done_labels(w.folder_name)
+            total_labels = {tp.label for tp in w.timepoints}
+            n_done = len(done & total_labels)
+            n_total = len(total_labels)
+            rows.append({
+                "mount_id": mount["id"],
+                "folder_name": w.folder_name,
+                "n_total": n_total,
+                "n_done": n_done,
+                "labels_done": sorted(done & total_labels),
+            })
+            n_total_all += n_total
+            n_done_all += n_done
+    return {
+        "wells": rows,
+        "n_total": n_total_all,
+        "n_done": n_done_all,
+    }
+
+
+# ---------------------- detector debug page ----------------------
+
+@app.get("/debug", response_class=HTMLResponse)
+def debug_page(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request, "debug.html", {"version": __version__}
+    )
+
+
+def _colorize_signed(arr: np.ndarray) -> np.ndarray:
+    """Render a signed float map as a centred BGR colormap: negative=cool,
+    positive=hot. Used for LoG response / flat-field visualisation."""
+    a = arr.astype(np.float32)
+    finite = a[np.isfinite(a)]
+    if finite.size == 0:
+        return np.zeros((arr.shape[0], arr.shape[1], 3), dtype=np.uint8)
+    vmax = max(abs(float(finite.min())), abs(float(finite.max())), 1e-6)
+    norm = np.clip((a / vmax + 1.0) * 0.5, 0, 1)
+    u8 = (norm * 255).astype(np.uint8)
+    return cv2.applyColorMap(u8, cv2.COLORMAP_TURBO)
+
+
+def _grayscale_rgb(arr: np.ndarray) -> np.ndarray:
+    a = arr.astype(np.float32)
+    lo, hi = float(np.percentile(a, 1)), float(np.percentile(a, 99))
+    if hi - lo < 1e-6:
+        u8 = np.zeros_like(a, dtype=np.uint8)
+    else:
+        u8 = np.clip((a - lo) / (hi - lo) * 255.0, 0, 255).astype(np.uint8)
+    return cv2.cvtColor(u8, cv2.COLOR_GRAY2BGR)
+
+
+@app.get("/api/detect-debug")
+def detect_debug(
+    key: str,
+    stage: str = "final",
+    r_min: int | None = None,
+    r_max: int | None = None,
+    r_step: int | None = None,
+    illum_sigma: float | None = None,
+    nms_factor: float | None = None,
+    score_frac: float | None = None,
+    ring_band: float | None = None,
+    halo_factor: float | None = None,
+    contrast_floor: float | None = None,
+) -> Response:
+    from cellyoulite.pipeline.circle_methods import detect_circles_debug
+
+    params = {
+        "r_min": r_min, "r_max": r_max, "r_step": r_step,
+        "illum_sigma": illum_sigma, "nms_factor": nms_factor,
+        "score_frac": score_frac, "ring_band": ring_band,
+        "halo_factor": halo_factor, "contrast_floor": contrast_floor,
+    }
+    img = _read_aligned(key)
+    if img.ndim == 2:
+        img = np.stack([img] * 3, axis=-1)
+    if img.dtype != np.uint8:
+        img = np.clip(img[..., :3], 0, 255).astype(np.uint8)
+    # Early-exit the pipeline by stage so the page is responsive when only
+    # looking at flat-field / LoG (don't run downstream work).
+    stop_at = stage if stage in ("gray", "flat", "log", "final") else "final"
+    d = detect_circles_debug(img[..., :3], params, stop_at=stop_at)
+
+    if stage == "gray":
+        base = _grayscale_rgb(d["gray"])
+    elif stage == "flat":
+        base = _colorize_signed(d["flat"])
+    elif stage == "log":
+        base = _colorize_signed(d["log_response"])
+    else:  # "final"
+        base = cv2.cvtColor(img[..., :3], cv2.COLOR_RGB2BGR)
+
+    # Only draw circles when explicitly looking at the final stage. The user
+    # wants the transformed image to be visible underneath; circles would
+    # just obscure what they're trying to inspect.
+    if stage == "final":
+        for cx, cy, r in d["rejected_by_contrast"]:
+            cv2.circle(base, (int(cx), int(cy)), int(r), (60, 60, 220), 1, cv2.LINE_AA)
+        for cx, cy, r in d["circles"]:
+            cv2.circle(base, (int(cx), int(cy)), int(r), (90, 220, 90), 2, cv2.LINE_AA)
+            cv2.drawMarker(base, (int(cx), int(cy)), (90, 220, 90),
+                           cv2.MARKER_CROSS, markerSize=10, thickness=2)
+
+    # Header strip with the count summary.
+    h_strip = 28
+    strip = np.zeros((h_strip, base.shape[1], 3), dtype=np.uint8)
+    summary = (f"stage={stage}  accepted={len(d['circles'])}  "
+               f"rejected={len(d['rejected_by_contrast'])}  "
+               f"pre={len(d['pre_contrast'])}")
+    cv2.putText(strip, summary, (8, 19), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                (255, 255, 255), 1, cv2.LINE_AA)
+    base = np.vstack([strip, base])
+
+    ok, buf = cv2.imencode(".jpg", base, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+    if not ok:
+        raise HTTPException(status_code=500, detail="jpeg encode failed")
+    resp = Response(content=buf.tobytes(), media_type="image/jpeg")
+    resp.headers["X-Accepted"] = str(len(d["circles"]))
+    resp.headers["X-Rejected"] = str(len(d["rejected_by_contrast"]))
+    resp.headers["X-PreContrast"] = str(len(d["pre_contrast"]))
+    return resp
+
+
 # ---------------------- annotation tool ----------------------
 
 _ANN_ROOT = Path.cwd() / "annotations"
