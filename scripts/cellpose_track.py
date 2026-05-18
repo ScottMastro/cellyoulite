@@ -37,6 +37,11 @@ RADIUS_LAMBDA = 0.5      # weight of |Δr| in cost (1 px Δr ~= 0.5 px Δcenter)
 MAX_COST = 40.0          # reject matches above this
 MAX_GAP = 2              # frames a track can disappear and still continue
 
+# Validity: a track must appear in at least this fraction of frames to be
+# considered "good" — i.e. usable for growth analysis. Sparse tracks are
+# kept in the file but flagged invalid so they can be greyed out / dropped.
+DEFAULT_MIN_FRAC = 0.75
+
 
 _LABEL_RE = re.compile(r"^(\d+)d(\d+)h(\d+)m$")
 
@@ -60,7 +65,7 @@ class Track:
         return self.detections[-1] if self.detections else None
 
 
-def link_well(well_dir: Path) -> dict:
+def link_well(well_dir: Path, min_frac: float = DEFAULT_MIN_FRAC) -> dict:
     files = sorted(well_dir.glob("*.json"),
                    key=lambda p: _label_to_minutes(p.stem))
     frames: list[tuple[int, str, list[dict]]] = []
@@ -117,8 +122,12 @@ def link_well(well_dir: Path) -> dict:
             ))
             next_id += 1
 
+    n_frames = len(frames)
+    min_detections = max(1, int(round(min_frac * n_frames)))
     return {
-        "n_frames": len(frames),
+        "n_frames": n_frames,
+        "min_frac": min_frac,
+        "min_detections": min_detections,
         "frame_labels": [lbl for _, lbl, _ in frames],
         "tracks": [
             {
@@ -126,6 +135,7 @@ def link_well(well_dir: Path) -> dict:
                 "n_detections": len(t.detections),
                 "first_t": t.detections[0]["t_idx"],
                 "last_t": t.detections[-1]["t_idx"],
+                "valid": len(t.detections) >= min_detections,
                 "detections": t.detections,
             }
             for t in sorted(tracks, key=lambda x: -len(x.detections))
@@ -137,6 +147,9 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--wells", nargs="*", default=None)
     ap.add_argument("--out", default=str(_TRACKS_ROOT))
+    ap.add_argument("--min-frac", type=float, default=DEFAULT_MIN_FRAC,
+                    help="minimum fraction of frames a track must appear in "
+                         "to be considered valid (default %(default)s)")
     args = ap.parse_args()
 
     out_root = Path(args.out)
@@ -148,20 +161,21 @@ def main() -> None:
         raise SystemExit(f"no cached wells under {_CACHE_ROOT}/"
                           + (f" matching {args.wells}" if args.wells else ""))
 
-    print(f"linking {len(well_dirs)} well(s)")
-    for d in well_dirs:
-        result = link_well(d)
+    print(f"tracking {len(well_dirs)} well(s)  min_frac={args.min_frac}", flush=True)
+    for i, d in enumerate(well_dirs, 1):
+        result = link_well(d, min_frac=args.min_frac)
         out_path = out_root / f"{d.name}.json"
         out_path.write_text(json.dumps(result, indent=2))
-        # summary
         n_total = len(result["tracks"])
+        n_good = sum(1 for t in result["tracks"] if t["valid"])
+        n_bad = n_total - n_good
         n_full = sum(1 for t in result["tracks"]
                       if t["n_detections"] == result["n_frames"])
-        n_durable = sum(1 for t in result["tracks"]
-                         if t["n_detections"] >= 0.75 * result["n_frames"])
-        print(f"  {d.name:24s}  frames={result['n_frames']:2d}  "
-              f"tracks={n_total:3d}  full={n_full:3d}  ≥75%={n_durable:3d}  "
-              f"→ {out_path.name}")
+        # Per-well progress line — matches the [N/M] format the UI parses.
+        print(f"[{i:3d}/{len(well_dirs):3d}] {d.name:24s}  "
+              f"tracks={n_total:3d}  good={n_good:3d}  bad={n_bad:3d}  "
+              f"full={n_full:3d}", flush=True)
+    print(f"\ndone — wrote tracks for {len(well_dirs)} well(s)", flush=True)
 
 
 if __name__ == "__main__":

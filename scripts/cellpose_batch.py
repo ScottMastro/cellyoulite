@@ -82,11 +82,22 @@ def _cache_path(well_folder: str, label: str) -> Path:
     return p / f"{label}.json"
 
 
+def _mask_path(well_folder: str, label: str) -> Path:
+    """16-bit PNG sidecar holding the cellpose label mask (one int per
+    pixel). Saved next to the circles JSON."""
+    safe_well = well_folder.replace("/", "_")
+    return _CACHE_ROOT / safe_well / f"{label}.mask.png"
+
+
 def _process_one(args: tuple) -> dict:
     """Worker: do one (well, t_idx). Returns a small result dict."""
     well_folder, t_idx, label, paths, placement, canvas_shape, gpu, force = args
     out_path = _cache_path(well_folder, label)
-    if out_path.is_file() and not force:
+    mask_path = _mask_path(well_folder, label)
+    # Only treat as a cache hit if BOTH the circles JSON and the mask sidecar
+    # are present. Older cached frames without masks get re-segmented so the
+    # edges layer is available for them too.
+    if out_path.is_file() and mask_path.is_file() and not force:
         try:
             data = json.loads(out_path.read_text())
             return {"well": well_folder, "t_idx": t_idx, "label": label,
@@ -112,7 +123,14 @@ def _process_one(args: tuple) -> dict:
     out_path.write_text(json.dumps({
         "well": well_folder, "label": label, "t_idx": t_idx,
         "model": "cpsam", "circles": circles,
+        "has_mask": True,
     }, indent=2))
+    # Save the per-instance label mask as a 16-bit PNG sidecar. Cellpose can
+    # return up to several hundred instances per frame so uint16 is safer
+    # than uint8.
+    import cv2 as _cv2
+    _cv2.imwrite(str(_mask_path(well_folder, label)),
+                 masks.astype(np.uint16))
     return {"well": well_folder, "t_idx": t_idx, "label": label,
             "n_circles": len(circles), "cached": False, "ms": elapsed_ms}
 

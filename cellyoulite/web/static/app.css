@@ -166,6 +166,17 @@ button:disabled:hover { border-color: var(--rule-strong); color: var(--ink); fil
 }
 .pill strong { color: var(--accent); font-weight: 600; }
 
+/* Viewer stat pill: fixed width so transitions between "loading…" and
+   "N organoids detected" don't push neighbouring toolbar items around. */
+#viewer-stat {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 200px;
+  padding: 6px 16px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+#viewer-stat strong { margin-right: 4px; }
+
 /* ---------- log / output ---------- */
 
 pre.log {
@@ -297,16 +308,87 @@ footer a { color: var(--accent); text-decoration: none; }
 .filmstrip .frame.cp-done    .frame-cp-dot { background: #20c97a; }
 .filmstrip .frame.cp-todo    .frame-cp-dot { background: #555; }
 
-/* Cellpose run bar in the data-folder card. */
-.cellpose-bar {
-  display: flex; flex-direction: column; gap: 6px;
-  margin-top: 10px; padding: 8px 10px;
-  background: var(--panel-2); border: 1px solid var(--rule); border-radius: 6px;
+/* Pipeline job bars in the data-folder card (alignment, segmentation). */
+.job-bar {
+  display: flex; flex-direction: column; gap: 10px;
+  margin-top: 14px;
+  padding: 14px 16px;
+  background: var(--panel-2);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
 }
-.cellpose-bar-head {
-  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+.job-bar + .job-bar { margin-top: 10px; }
+.job-bar-head {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  row-gap: 8px;
 }
-.cellpose-bar-head .hint { margin-left: auto; }
+.job-bar-head .hint { margin-left: auto; font-size: 12px; }
+#al-summary, #cp-summary {
+  margin-left: auto;
+  font: 500 12px var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--ink);
+  background: #1a1f29;
+  padding: 4px 10px;
+  border: 1px solid var(--rule);
+  border-radius: 999px;
+  white-space: nowrap;
+  letter-spacing: 0.01em;
+}
+.job-bar-label {
+  flex: 0 0 auto;
+  font: 600 11px var(--mono);
+  color: var(--ink-soft);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 3px 8px;
+  background: #1a1f29;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+}
+.job-bar .progress { margin-top: 2px; }
+.job-bar #al-last-line,
+.job-bar #cp-last-line {
+  display: flex; align-items: center; gap: 8px;
+  margin-top: -2px;
+  min-height: 22px;
+  opacity: 1;
+}
+.log-counter {
+  font: 600 11px var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+  background: #0c2435;
+  padding: 2px 8px;
+  border: 1px solid #1f6fa0;
+  border-radius: 4px;
+  letter-spacing: 0.04em;
+}
+.log-subject {
+  color: var(--ink); font-size: 12px;
+  flex: 1; min-width: 0;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.log-tail {
+  font: 500 11px var(--mono);
+  font-variant-numeric: tabular-nums;
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--rule);
+}
+.log-tail.log-cache { color: #1f9e89; border-color: #1f9e8955; background: #0f1f1c; }
+.log-tail.log-ms    { color: #ffd24a; border-color: #ffd24a55; background: #221c0c; }
+
+/* "Already done" state for a job-bar primary button. Greyed out + check. */
+button.primary.done,
+button.primary.done:disabled {
+  background: transparent;
+  color: #20c97a;
+  border-color: #1f9e8966;
+  cursor: default;
+  opacity: 0.85;
+}
+button.primary.done:hover { background: transparent; }
 .progress {
   height: 8px; background: #1a1f29; border-radius: 4px; overflow: hidden;
   border: 1px solid var(--rule);
@@ -421,12 +503,23 @@ button.ghost:hover { border-color: var(--err); color: var(--err); }
   vector-effect: non-scaling-stroke;
 }
 #layer-cellpose circle {
-  fill: #ffd24a;
-  fill-opacity: 0.10;
-  stroke: #ffd24a;
+  fill-opacity: 0.12;
   stroke-width: 1.8;
   stroke-opacity: 0.9;
   vector-effect: non-scaling-stroke;
+  cursor: pointer;
+  transition: fill-opacity 0.1s, stroke-width 0.1s;
+}
+#layer-cellpose circle:hover {
+  fill-opacity: 0.30;
+  stroke-width: 3;
+}
+/* Default (no track linkage yet) — solid yellow. */
+#layer-cellpose circle.circ-untracked { fill: #ffd24a; stroke: #ffd24a; }
+/* Invalid tracks — dim red dashed, visible on dark microscopy bg. */
+#layer-cellpose circle.circ-invalid {
+  fill: #c64646; stroke: #ff5c5c;
+  stroke-dasharray: 5 4; fill-opacity: 0.08;
 }
 
 /* ---------- thumbnail hover preview ---------- */
@@ -538,11 +631,42 @@ button.ghost:hover { border-color: var(--err); color: var(--err); }
   box-shadow: 0 0 0 1px var(--accent), 0 0 12px var(--accent-soft);
 }
 .filmstrip .frame-tag {
-  position: absolute; top: 2px; right: 3px;
+  position: absolute; bottom: 2px; left: 3px;
   font: 500 9px var(--mono); color: #e6e9ee;
   background: #000a; padding: 1px 4px; border-radius: 3px;
   pointer-events: none;
 }
+
+.growth-plot {
+  margin: 10px 12px 0;
+  padding: 8px 12px;
+  background: var(--panel-2); border: 1px solid var(--rule); border-radius: 8px;
+}
+.growth-plot:empty { display: none; }
+.growth-plot-head {
+  font: 500 12px var(--mono); color: var(--ink-soft); margin-bottom: 6px;
+}
+.growth-plot-head strong { color: var(--accent); }
+.growth-svg { width: 100%; height: auto; display: block; }
+.growth-svg polyline { transition: stroke-width 0.1s, stroke-opacity 0.1s; }
+.growth-svg polyline:hover { stroke-width: 2.6; stroke-opacity: 1.0; }
+
+.track-stitch {
+  margin: 10px 12px 0;
+  background: var(--panel-2); border: 1px solid var(--rule); border-radius: 8px;
+  overflow: hidden;
+}
+.track-stitch-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 10px; background: #1a1f29; border-bottom: 1px solid var(--rule);
+  font: 600 11px var(--mono); color: var(--ink-soft);
+  text-transform: uppercase; letter-spacing: 0.05em;
+}
+.track-stitch-head button { margin-left: auto; padding: 0 8px; font-size: 16px; line-height: 1; }
+.track-stitch-scroll {
+  overflow-x: auto; padding: 0; background: #000;
+}
+.track-stitch-scroll img { display: block; height: auto; }
 
 .well-plot { padding: .75rem 1rem; min-height: 0; }
 .well-plot:not(:empty) { min-height: 380px; }

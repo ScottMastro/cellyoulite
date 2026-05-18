@@ -40,9 +40,23 @@
     <p class="hint">Each experiment is a subfolder named <code>&lt;treatment&gt; r&lt;replicate&gt;</code>. Add or edit folders, then hit Refresh.</p>
     <div class="pills" id="grid-pills" hidden></div>
 
-    <div class="cellpose-bar" id="cellpose-bar">
-      <div class="cellpose-bar-head">
-        <button id="cp-run"    class="primary">Run Cellpose on all</button>
+    <div class="job-bar" id="align-bar">
+      <div class="job-bar-head">
+        <span class="job-bar-label">1. Alignment</span>
+        <button id="al-run"    class="primary">Run alignment</button>
+        <button id="al-cancel" class="ghost" hidden>Cancel</button>
+        <span id="al-summary" class="hint">—</span>
+      </div>
+      <div class="progress" id="al-progress" hidden>
+        <div class="progress-fill" id="al-progress-fill"></div>
+      </div>
+      <div id="al-last-line" class="mono small hint"></div>
+    </div>
+
+    <div class="job-bar" id="cellpose-bar">
+      <div class="job-bar-head">
+        <span class="job-bar-label">2. Segmentation (Cellpose-SAM)</span>
+        <button id="cp-run"    class="primary">Run segmentation</button>
         <button id="cp-cancel" class="ghost" hidden>Cancel</button>
         <span id="cp-summary" class="hint">—</span>
       </div>
@@ -50,6 +64,19 @@
         <div class="progress-fill" id="cp-progress-fill"></div>
       </div>
       <div id="cp-last-line" class="mono small hint"></div>
+    </div>
+
+    <div class="job-bar" id="track-bar">
+      <div class="job-bar-head">
+        <span class="job-bar-label">3. Tracking (link across time)</span>
+        <button id="tr-run"    class="primary">Run tracking</button>
+        <button id="tr-cancel" class="ghost" hidden>Cancel</button>
+        <span id="tr-summary" class="hint">—</span>
+      </div>
+      <div class="progress" id="tr-progress" hidden>
+        <div class="progress-fill" id="tr-progress-fill"></div>
+      </div>
+      <div id="tr-last-line" class="mono small hint"></div>
     </div>
   </section>
 
@@ -71,10 +98,8 @@
           <span class="swatch swatch-align"></span> align frames</label>
         <label class="toggle"><input type="checkbox" id="toggle-edges" checked>
           <span class="swatch swatch-edges"></span> pixel edges</label>
-        <label class="toggle"><input type="checkbox" id="toggle-circles" checked>
-          <span class="swatch swatch-circles"></span> best-fit circles</label>
-        <label class="toggle"><input type="checkbox" id="toggle-cellpose" checked>
-          <span class="swatch swatch-cellpose"></span> cellpose</label>
+        <label class="toggle"><input type="checkbox" id="toggle-cellpose">
+          <span class="swatch swatch-cellpose"></span> circles</label>
         <span id="viewer-stat" class="pill"></span>
         <button id="well-close" class="ghost">close</button>
       </div>
@@ -84,7 +109,6 @@
           <img id="viewer-img" class="base" alt="">
           <img id="layer-edges-img" class="overlay" alt="">
           <svg id="viewer-svg" class="overlay" preserveAspectRatio="none">
-            <g id="layer-circles"></g>
             <g id="layer-cellpose"></g>
           </svg>
         </div>
@@ -108,6 +132,18 @@
       <div class="filmstrip-wrap">
         <div id="filmstrip" class="filmstrip"></div>
       </div>
+
+      <div id="track-stitch" class="track-stitch" hidden>
+        <div class="track-stitch-head">
+          <span id="track-stitch-title">track</span>
+          <button id="track-stitch-close" class="ghost">×</button>
+        </div>
+        <div class="track-stitch-scroll">
+          <img id="track-stitch-img" alt="track over time">
+        </div>
+      </div>
+
+      <div id="growth-plot" class="growth-plot"></div>
 
       <div id="well-plot" class="well-plot"></div>
     </div>
@@ -144,6 +180,7 @@
   let currentGrid = null;
   let currentWell = null;        // {mount_id, mount_alias, treatment, replicate, folder_name, timepoints}
   let currentTIdx = 0;
+  let currentTracks = null;      // {n_frames, tracks: [...]} for the open well, or null
   // Cellpose cache status per well: folder_name -> {n_total, n_done, labels_done: Set<string>}
   let cellposeStatus = new Map();
   let playTimer = null;
@@ -163,10 +200,10 @@
     if (aligned) q += `&aligned=1`;
     return `/api/image?${q}`;
   };
-  const edgesUrl = (key, aligned = 0) => {
-    let q = `key=${encodeURIComponent(key)}`;
-    if (aligned) q += `&aligned=1`;
-    return `/api/edges?${q}`;
+  const edgesUrl = (key, aligned = 1) => {
+    // Cellpose-derived boundaries. aligned=0 crops the boundary mask back
+    // to the raw frame so it lines up with the unaligned image.
+    return `/api/cellpose-edges?key=${encodeURIComponent(key)}&aligned=${aligned}`;
   };
 
   // ---------------- data folder ----------------
@@ -206,82 +243,205 @@
     } catch (e) { return false; }
   }
 
-  // Combined poll: cellpose cache state + job status, every 2s while a job
-  // is running; every 5s otherwise.
-  let cpPollMs = 5000;
-  async function cellposePoll() {
+  // Combined poll: alignment + cellpose status + both job states.
+  // 2s while anything is running; 5s when idle.
+  let pollMs = 5000;
+  let alignStatus = { n_done: 0, n_total: 0 };
+  let trackStatus = { n_done: 0, n_total: 0 };
+
+  async function refreshAlignStatus() {
+    try {
+      const r = await fetch("/api/align-status");
+      if (!r.ok) return;
+      const data = await r.json();
+      alignStatus = { n_done: data.n_done || 0, n_total: data.n_total || 0 };
+    } catch (e) {}
+  }
+  async function refreshTrackStatus() {
+    try {
+      const r = await fetch("/api/track-status");
+      if (!r.ok) return;
+      const data = await r.json();
+      trackStatus = { n_done: data.n_done || 0, n_total: data.n_total || 0 };
+    } catch (e) {}
+  }
+
+  async function combinedPoll() {
+    await Promise.all([refreshAlignStatus(), refreshTrackStatus()]);
     const changed = await refreshCellposeStatus();
     if (changed) {
       if (currentGrid) renderThumbGrid(currentGrid);
       if (currentWell) { renderFilmstrip(); updateWellCpStatus(); }
     }
+    let anyRunning = false;
     try {
-      const r = await fetch("/api/cellpose-job");
-      if (r.ok) {
-        const job = await r.json();
-        updateCellposeBar(job);
-        cpPollMs = job.running ? 2000 : 5000;
-      }
+      const [aj, cj, tj] = await Promise.all([
+        fetch("/api/align-job").then(r => r.ok ? r.json() : null),
+        fetch("/api/cellpose-job").then(r => r.ok ? r.json() : null),
+        fetch("/api/track-job").then(r => r.ok ? r.json() : null),
+      ]);
+      if (aj) { updateAlignBar(aj); anyRunning = anyRunning || aj.running; }
+      if (cj) { updateCellposeBar(cj); anyRunning = anyRunning || cj.running; }
+      if (tj) { updateTrackBar(tj); anyRunning = anyRunning || tj.running; }
     } catch (e) {}
-    setTimeout(cellposePoll, cpPollMs);
+    pollMs = anyRunning ? 2000 : 5000;
+    setTimeout(combinedPoll, pollMs);
   }
-  setTimeout(cellposePoll, 1500);
+  setTimeout(combinedPoll, 1500);
 
-  function updateCellposeBar(job) {
-    let nDone = 0, nTotal = 0;
-    for (const st of cellposeStatus.values()) { nDone += st.n_done; nTotal += st.n_total; }
-    const pct = nTotal ? Math.round(100 * nDone / nTotal) : 0;
-    $("cp-progress").hidden = nTotal === 0;
-    $("cp-progress-fill").style.width = `${pct}%`;
-    $("cp-progress-fill").classList.toggle("running", job.running);
-
-    const runBtn = $("cp-run"), cancelBtn = $("cp-cancel");
-    if (job.running) {
-      runBtn.disabled = true;
-      runBtn.textContent = "Running…";
-      cancelBtn.hidden = false;
-    } else {
-      runBtn.disabled = false;
-      runBtn.textContent = nDone >= nTotal && nTotal > 0
-        ? "Re-run Cellpose (cached)" : "Run Cellpose on all";
-      cancelBtn.hidden = true;
-    }
-    const eta = etaFromJob(job, nDone, nTotal);
-    $("cp-summary").textContent =
-      `${nDone}/${nTotal} processed (${pct}%)`
-      + (job.running ? ` · running · ${eta}` : "");
-    $("cp-last-line").textContent = job.running ? (job.last_line || "") : "";
+  function fmtPct(nDone, nTotal) {
+    return nTotal ? Math.round(100 * nDone / nTotal) : 0;
   }
-
-  function etaFromJob(job, nDone, nTotal) {
+  function escapeHtml(s) {
+    return s.replace(/[&<>"']/g, c => (
+      {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]
+    ));
+  }
+  // Reformat a "[ N/ M] subject   tail" log line into styled spans.
+  function formatLastLine(line) {
+    if (!line) return "";
+    const m = line.match(/^\s*\[\s*(\d+)\s*\/\s*(\d+)\s*\]\s*(.*)$/);
+    if (!m) return escapeHtml(line);
+    const i = parseInt(m[1]), total = parseInt(m[2]);
+    const rest = m[3];
+    // Split trailing "<ms>ms" or "cache" tag from the subject if present.
+    const tailMatch = rest.match(/^(.*?)\s{2,}(cache|\d+ms)\s*$/);
+    const subject = tailMatch ? tailMatch[1] : rest;
+    const tail = tailMatch ? tailMatch[2] : "";
+    return `<span class="log-counter">${i}/${total}</span>`
+         + `<span class="log-subject">${escapeHtml(subject)}</span>`
+         + (tail
+              ? `<span class="log-tail log-${tail === "cache" ? "cache" : "ms"}">${escapeHtml(tail)}</span>`
+              : "");
+  }
+  function etaFromJob(job) {
     if (!job.started_at || !job.running) return "";
     const elapsed = Math.max(1, Date.now() / 1000 - job.started_at);
-    // crude: assume ~uniform per-frame rate from when this run started
-    const lastNum = (job.last_line || "").match(/\[\s*(\d+)\/\s*(\d+)\]/);
-    if (!lastNum) return "starting…";
-    const i = parseInt(lastNum[1]), total = parseInt(lastNum[2]);
+    const m = (job.last_line || "").match(/\[\s*(\d+)\/\s*(\d+)\]/);
+    if (!m) return "starting…";
+    const i = parseInt(m[1]), total = parseInt(m[2]);
     if (i <= 0 || total <= 0) return "";
-    const perFrame = elapsed / i;
-    const remaining = Math.round(perFrame * (total - i));
+    const remaining = Math.round((elapsed / i) * (total - i));
     const mm = String(Math.floor(remaining / 60)).padStart(2, "0");
     const ss = String(remaining % 60).padStart(2, "0");
     return `ETA ${mm}:${ss}`;
   }
 
+  function updateAlignBar(job) {
+    const { n_done, n_total } = alignStatus;
+    const pct = fmtPct(n_done, n_total);
+    $("al-progress").hidden = n_total === 0;
+    $("al-progress-fill").style.width = `${pct}%`;
+    $("al-progress-fill").classList.toggle("running", job.running);
+    const runBtn = $("al-run"), cancelBtn = $("al-cancel");
+    const allDone = n_total > 0 && n_done >= n_total;
+    if (job.running) {
+      runBtn.disabled = true; runBtn.textContent = "Running…";
+      runBtn.classList.remove("done");
+      cancelBtn.hidden = false;
+    } else if (allDone) {
+      runBtn.disabled = true;
+      runBtn.textContent = "Aligned ✓";
+      runBtn.classList.add("done");
+      cancelBtn.hidden = true;
+    } else {
+      runBtn.disabled = false;
+      runBtn.textContent = "Run alignment";
+      runBtn.classList.remove("done");
+      cancelBtn.hidden = true;
+    }
+    $("al-summary").textContent =
+      `${n_done}/${n_total} wells aligned (${pct}%)`
+      + (job.running ? ` · running · ${etaFromJob(job)}` : "");
+    $("al-last-line").innerHTML = job.running ? formatLastLine(job.last_line) : "";
+  }
+
+  function updateCellposeBar(job) {
+    let nDone = 0, nTotal = 0;
+    for (const st of cellposeStatus.values()) { nDone += st.n_done; nTotal += st.n_total; }
+    const pct = fmtPct(nDone, nTotal);
+    $("cp-progress").hidden = nTotal === 0;
+    $("cp-progress-fill").style.width = `${pct}%`;
+    $("cp-progress-fill").classList.toggle("running", job.running);
+    const runBtn = $("cp-run"), cancelBtn = $("cp-cancel");
+    if (job.running) {
+      runBtn.disabled = true; runBtn.textContent = "Running…";
+      cancelBtn.hidden = false;
+    } else {
+      runBtn.disabled = false;
+      runBtn.textContent = nDone >= nTotal && nTotal > 0
+        ? "Re-run segmentation" : "Run segmentation";
+      cancelBtn.hidden = true;
+    }
+    $("cp-summary").textContent =
+      `${nDone}/${nTotal} frames segmented (${pct}%)`
+      + (job.running ? ` · running · ${etaFromJob(job)}` : "");
+    $("cp-last-line").innerHTML = job.running ? formatLastLine(job.last_line) : "";
+  }
+
+  function updateTrackBar(job) {
+    const { n_done, n_total } = trackStatus;
+    const pct = fmtPct(n_done, n_total);
+    $("tr-progress").hidden = n_total === 0;
+    $("tr-progress-fill").style.width = `${pct}%`;
+    $("tr-progress-fill").classList.toggle("running", job.running);
+    const runBtn = $("tr-run"), cancelBtn = $("tr-cancel");
+    const allDone = n_total > 0 && n_done >= n_total;
+    if (job.running) {
+      runBtn.disabled = true; runBtn.textContent = "Running…";
+      runBtn.classList.remove("done");
+      cancelBtn.hidden = false;
+    } else if (allDone) {
+      runBtn.disabled = true; runBtn.textContent = "Tracked ✓";
+      runBtn.classList.add("done");
+      cancelBtn.hidden = true;
+    } else {
+      runBtn.disabled = false; runBtn.textContent = "Run tracking";
+      runBtn.classList.remove("done");
+      cancelBtn.hidden = true;
+    }
+    $("tr-summary").textContent =
+      `${n_done}/${n_total} wells tracked (${pct}%)`
+      + (job.running ? ` · running · ${etaFromJob(job)}` : "");
+    $("tr-last-line").innerHTML = job.running ? formatLastLine(job.last_line) : "";
+  }
+
+  $("tr-run").onclick = async () => {
+    $("tr-run").disabled = true;
+    try {
+      const r = await fetch("/api/track-run", { method: "POST" });
+      if (!r.ok) setStatus("err", `track-run: ${r.statusText}`);
+    } catch (e) { setStatus("err", String(e)); }
+  };
+  $("tr-cancel").onclick = async () => {
+    $("tr-cancel").disabled = true;
+    try { await fetch("/api/track-cancel", { method: "POST" }); }
+    finally { $("tr-cancel").disabled = false; }
+  };
+
+  $("al-run").onclick = async () => {
+    $("al-run").disabled = true;
+    try {
+      const r = await fetch("/api/align-run", { method: "POST" });
+      if (!r.ok) setStatus("err", `align-run: ${r.statusText}`);
+    } catch (e) { setStatus("err", String(e)); }
+  };
+  $("al-cancel").onclick = async () => {
+    $("al-cancel").disabled = true;
+    try { await fetch("/api/align-cancel", { method: "POST" }); }
+    finally { $("al-cancel").disabled = false; }
+  };
   $("cp-run").onclick = async () => {
     $("cp-run").disabled = true;
     try {
       const r = await fetch("/api/cellpose-run", { method: "POST" });
-      if (!r.ok) { setStatus("err", `cellpose-run: ${r.statusText}`); }
+      if (!r.ok) setStatus("err", `cellpose-run: ${r.statusText}`);
     } catch (e) { setStatus("err", String(e)); }
   };
   $("cp-cancel").onclick = async () => {
     $("cp-cancel").disabled = true;
-    try {
-      await fetch("/api/cellpose-cancel", { method: "POST" });
-    } finally {
-      $("cp-cancel").disabled = false;
-    }
+    try { await fetch("/api/cellpose-cancel", { method: "POST" }); }
+    finally { $("cp-cancel").disabled = false; }
   };
 
   $("refresh").onclick = () => refreshAll();
@@ -435,8 +595,26 @@
 
     if (alignFlag()) {
       $("viewer-stat").textContent = "computing alignment…";
-      try { await fetch(`/api/well-align?${qs}`); } catch (e) {}
     }
+    try {
+      const ar = await fetch(`/api/well-align?${qs}`);
+      if (ar.ok) wellAlignCache = await ar.json();
+    } catch (e) {}
+    // Try to pull the tracks file for this well; absent if tracking hasn't
+    // been run yet. Used to colour circles by track ID.
+    currentTracks = null;
+    $("growth-plot").innerHTML = "";
+    $("track-stitch").hidden = true;
+    try {
+      const tr = await fetch(`/api/tracks?${qs}`);
+      if (tr.ok) {
+        const td = await tr.json();
+        if (td.available) currentTracks = td;
+      }
+    } catch (e) {}
+    // Growth plot fetched in parallel; renders into #growth-plot if tracking
+    // is done for this well.
+    fetchGrowthPlot(qs);
     renderFilmstrip();
     showFrame(0);
     $("well-card").scrollIntoView({ behavior: "smooth", block: "start" });
@@ -501,36 +679,185 @@
     pre.src = nextSrc;
     $("viewer-stat").textContent = "loading…";
 
-    const qs = `key=${encodeURIComponent(tp.key)}${a ? "&aligned=1" : ""}`;
+    // Cellpose circles for this frame (single source of truth for the
+    // overlay). Empty if the frame isn't segmented yet.
     try {
-      const r = await fetch(`/api/overlay?${qs}`);
-      const data = await r.json();
-      if (!r.ok) throw new Error(data.detail || r.statusText);
-      $("viewer-svg").setAttribute("viewBox", `0 0 ${data.width} ${data.height}`);
-      $("layer-circles").innerHTML = data.circles.map(c =>
-        `<circle cx="${c.cx}" cy="${c.cy}" r="${c.r}" />`
-      ).join("");
-      applyToggles();
-      $("viewer-stat").innerHTML = `<strong>${data.n_passed}</strong> organoids passed QC`;
-    } catch (e) {
-      $("viewer-stat").textContent = String(e.message || e);
-    }
-
-    // Cellpose overlay (independent fetch; absent if frame not yet processed).
-    try {
-      const cpKey = `key=${encodeURIComponent(tp.key)}`;
+      const cpKey = `key=${encodeURIComponent(tp.key)}&aligned=${a}`;
       const r2 = await fetch(`/api/cellpose-circles?${cpKey}`);
       const d2 = await r2.json();
       if (r2.ok && d2.cached) {
-        $("layer-cellpose").innerHTML = d2.circles.map(c =>
-          `<circle cx="${c.cx}" cy="${c.cy}" r="${c.r}" />`
-        ).join("");
+        $("viewer-svg").setAttribute("viewBox", `0 0 ${d2.width} ${d2.height}`);
+        $("layer-cellpose").innerHTML = renderTrackedCircles(d2.circles, i, a);
+        const goodTotal = currentTracks
+          ? currentTracks.tracks.filter(t => t.valid).length : null;
+        $("viewer-stat").innerHTML = goodTotal != null
+          ? `<strong>${d2.circles.length}</strong> detected · <strong>${goodTotal}</strong> tracked`
+          : `<strong>${d2.circles.length}</strong> organoids detected`;
       } else {
         $("layer-cellpose").innerHTML = "";
+        $("viewer-stat").innerHTML = "not yet segmented";
       }
       applyToggles();
     } catch (e) {
       $("layer-cellpose").innerHTML = "";
+      $("viewer-stat").textContent = String(e.message || e);
+    }
+  }
+
+  // ---------- track coloring ----------
+  // Build a per-frame map from (cx, cy, r) → {track_id, valid} by indexing
+  // the tracks JSON. We match by rounded center distance < 2px, which is
+  // tight enough to be reliable and tolerant of float rounding.
+  function detectionsForFrame(t_idx, alignedFlag) {
+    if (!currentTracks) return [];
+    // Each track has detections array; pull those at the requested t_idx.
+    const out = [];
+    for (const tr of currentTracks.tracks) {
+      for (const d of tr.detections) {
+        if (d.t_idx !== t_idx) continue;
+        out.push({ cx: d.cx, cy: d.cy, r: d.r,
+                   track_id: tr.id, valid: tr.valid });
+        break;
+      }
+    }
+    return out;
+  }
+
+  function renderTrackedCircles(circles, t_idx, alignedFlag) {
+    if (!currentTracks) {
+      // Tracking hasn't run — render solid yellow.
+      return circles.map(c =>
+        `<circle cx="${c.cx}" cy="${c.cy}" r="${c.r}" class="circ-untracked" />`
+      ).join("");
+    }
+    // Build a quick lookup of track detections at this t_idx, including
+    // the well-alignment shift if the viewer is unaligned.
+    const trackDets = detectionsForFrame(t_idx, alignedFlag);
+    // When the viewer is unaligned, /api/cellpose-circles already returns
+    // shifted coords; but currentTracks lives in aligned coords. To match
+    // we need to add the placement offset back when alignedFlag === 0.
+    // We get the offset from the latest /api/well-align response cached
+    // in `wellAlignCache` (populated lazily below). For simplicity, when
+    // viewing unaligned we ask the server for the well's placements once.
+    const placement = alignedFlag ? null : (wellAlignCache && wellAlignCache.placements
+        ? wellAlignCache.placements[t_idx] : null);
+    return circles.map(c => {
+      const cxA = placement ? c.cx + placement[1] : c.cx;
+      const cyA = placement ? c.cy + placement[0] : c.cy;
+      // Find the closest track-detection by aligned-coords distance.
+      let best = null;
+      for (const td of trackDets) {
+        const d = Math.hypot(td.cx - cxA, td.cy - cyA);
+        if (d < 3 && (best == null || d < best[1])) best = [td, d];
+      }
+      if (!best) {
+        return `<circle cx="${c.cx}" cy="${c.cy}" r="${c.r}" class="circ-untracked" />`;
+      }
+      const td = best[0];
+      if (!td.valid) {
+        return `<circle cx="${c.cx}" cy="${c.cy}" r="${c.r}" data-track-id="${td.track_id}" class="circ-invalid" />`;
+      }
+      const hue = (td.track_id * 137.508) % 360;
+      return `<circle cx="${c.cx}" cy="${c.cy}" r="${c.r}" `
+           + `data-track-id="${td.track_id}" `
+           + `stroke="hsl(${hue.toFixed(0)}, 85%, 60%)" `
+           + `fill="hsl(${hue.toFixed(0)}, 85%, 60%)" />`;
+    }).join("");
+  }
+
+  // Well-alignment placements cache so unaligned-view colouring works.
+  let wellAlignCache = null;
+
+  // Click on a circle in the SVG → fetch a wide stitch PNG for that track.
+  $("viewer-svg").addEventListener("click", async (e) => {
+    const c = e.target.closest("circle[data-track-id]");
+    if (!c || !currentWell) return;
+    const trackId = parseInt(c.getAttribute("data-track-id"));
+    await showTrackStitch(trackId);
+  });
+  $("track-stitch-close").onclick = () => { $("track-stitch").hidden = true; };
+
+  async function fetchGrowthPlot(qs) {
+    try {
+      const r = await fetch(`/api/well-growth?${qs}&valid_only=1`);
+      if (!r.ok) return;
+      const data = await r.json();
+      if (!data.available || !data.tracks.length) {
+        $("growth-plot").innerHTML = "";
+        return;
+      }
+      renderGrowthPlot(data.tracks);
+    } catch (e) {}
+  }
+
+  function renderGrowthPlot(tracks) {
+    const W = 880, H = 320, PAD_L = 50, PAD_R = 16, PAD_T = 14, PAD_B = 30;
+    // Bounds
+    let maxMin = 0, maxNorm = 1;
+    for (const t of tracks) for (const p of t.points) {
+      if (p.minutes > maxMin) maxMin = p.minutes;
+      if (p.norm > maxNorm) maxNorm = p.norm;
+    }
+    if (maxMin === 0) maxMin = 1;
+    const x = m => PAD_L + (W - PAD_L - PAD_R) * (m / maxMin);
+    const y = n => H - PAD_B - (H - PAD_T - PAD_B) * ((n - 1) / Math.max(0.01, maxNorm - 1));
+    const lines = tracks.map(t => {
+      const hue = (t.id * 137.508) % 360;
+      const pts = t.points.map(p => `${x(p.minutes).toFixed(1)},${y(p.norm).toFixed(1)}`).join(" ");
+      return `<polyline points="${pts}" stroke="hsl(${hue.toFixed(0)},85%,60%)" `
+           + `fill="none" stroke-width="1.4" stroke-opacity="0.85" `
+           + `data-track-id="${t.id}">`
+           + `</polyline>`;
+    }).join("");
+    const xTicks = [0, 0.25, 0.5, 0.75, 1].map(f => {
+      const m = Math.round(maxMin * f);
+      const hours = (m / 60).toFixed(m >= 60 ? 1 : 2);
+      const xp = x(m).toFixed(1);
+      return `<g><line x1="${xp}" y1="${H - PAD_B}" x2="${xp}" y2="${H - PAD_B + 4}" stroke="#888"/>`
+           + `<text x="${xp}" y="${H - PAD_B + 18}" text-anchor="middle" fill="#aaa" font-size="10">${hours}h</text></g>`;
+    }).join("");
+    const yTicks = [1, 1.5, 2, 3, 4, 6, 8].filter(v => v <= maxNorm + 0.01).map(v => {
+      const yp = y(v).toFixed(1);
+      return `<g><line x1="${PAD_L - 4}" y1="${yp}" x2="${PAD_L}" y2="${yp}" stroke="#888"/>`
+           + `<text x="${PAD_L - 6}" y="${(parseFloat(yp) + 3).toFixed(1)}" text-anchor="end" fill="#aaa" font-size="10">${v}×</text>`
+           + `<line x1="${PAD_L}" y1="${yp}" x2="${W - PAD_R}" y2="${yp}" stroke="#222" stroke-dasharray="2 4"/></g>`;
+    }).join("");
+    $("growth-plot").innerHTML = `
+      <div class="growth-plot-head">growth (area / area@t0) — <strong>${tracks.length}</strong> tracks · click a curve to inspect</div>
+      <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" class="growth-svg">
+        <rect x="${PAD_L}" y="${PAD_T}" width="${W - PAD_L - PAD_R}" height="${H - PAD_T - PAD_B}" fill="#0d1117" stroke="#2a2f38"/>
+        ${yTicks}
+        ${xTicks}
+        ${lines}
+        <text x="${PAD_L - 38}" y="${PAD_T + 10}" fill="#aaa" font-size="10">norm</text>
+        <text x="${W - PAD_R}" y="${H - PAD_B + 18}" text-anchor="end" fill="#aaa" font-size="10">time</text>
+      </svg>
+    `;
+    // Click a curve → show stitch for that track.
+    $("growth-plot").querySelectorAll("polyline[data-track-id]").forEach(el => {
+      el.style.cursor = "pointer";
+      el.onclick = () => showTrackStitch(parseInt(el.getAttribute("data-track-id")));
+    });
+  }
+
+  async function showTrackStitch(trackId) {
+    if (!currentWell) return;
+    const qs = `mount_id=${encodeURIComponent(currentWell.mount_id)}`
+             + `&folder_name=${encodeURIComponent(currentWell.folder_name)}`
+             + `&track_id=${trackId}`;
+    const wrap = $("track-stitch");
+    wrap.hidden = false;
+    $("track-stitch-title").textContent = `track ${trackId} · loading…`;
+    $("track-stitch-img").removeAttribute("src");
+    try {
+      const r = await fetch(`/api/track-stitch?${qs}`);
+      if (!r.ok) { $("track-stitch-title").textContent = `track ${trackId} · error`; return; }
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      $("track-stitch-img").src = url;
+      $("track-stitch-title").textContent = `track ${trackId}`;
+    } catch (e) {
+      $("track-stitch-title").textContent = `track ${trackId} · ${e.message || e}`;
     }
   }
 
@@ -553,11 +880,9 @@
 
   const applyToggles = () => {
     $("layer-edges-img").style.display = $("toggle-edges").checked ? "" : "none";
-    $("layer-circles").style.display = $("toggle-circles").checked ? "" : "none";
     $("layer-cellpose").style.display = $("toggle-cellpose").checked ? "" : "none";
   };
   $("toggle-edges").onchange = applyToggles;
-  $("toggle-circles").onchange = applyToggles;
   $("toggle-cellpose").onchange = applyToggles;
   $("toggle-align").onchange = async () => {
     if (!currentWell) return;

@@ -410,11 +410,384 @@ _CELLPOSE_CACHE_ROOT = Path.cwd() / ".cellpose_cache"
 
 
 def _cellpose_done_labels(well_folder: str) -> set[str]:
+    """A frame is 'done' only when BOTH the circles JSON and the mask PNG
+    sidecar are present. Older runs (JSON-only) get re-processed by the
+    batch script and shouldn't be reported as complete."""
     safe = well_folder.replace("/", "_")
     d = _CELLPOSE_CACHE_ROOT / safe
     if not d.is_dir():
         return set()
-    return {p.stem for p in d.glob("*.json")}
+    done = set()
+    for p in d.glob("*.json"):
+        if (d / f"{p.stem}.mask.png").is_file():
+            done.add(p.stem)
+    return done
+
+
+# ---------------------- tracking ----------------------
+
+_TRACKS_ROOT = Path.cwd() / "tracks"
+_track_job: dict = {
+    "proc": None, "started_at": None, "stopped_at": None,
+    "returncode": None, "last_log": [], "last_line": "",
+}
+_track_job_lock = None
+
+
+@app.get("/api/track-status")
+def track_status() -> dict:
+    """Per-well: does tracks/<well>.json exist and is it newer than every
+    .cellpose_cache/<well>/*.json file under it? If a frame is segmented
+    after the tracks file was written, the well counts as stale."""
+    rows = []
+    n_total = 0; n_done = 0
+    for mount in _mounts():
+        try:
+            spec = _wells_for_mount(mount)
+        except Exception:  # noqa: BLE001
+            continue
+        for w in spec.wells:
+            safe = w.folder_name.replace("/", "_")
+            track_path = _TRACKS_ROOT / f"{safe}.json"
+            cache_dir = _CELLPOSE_CACHE_ROOT / safe
+            track_mtime = track_path.stat().st_mtime if track_path.is_file() else None
+            stale = False
+            if track_mtime is not None and cache_dir.is_dir():
+                for f in cache_dir.glob("*.json"):
+                    if f.stat().st_mtime > track_mtime:
+                        stale = True; break
+            done = track_mtime is not None and not stale
+            rows.append({
+                "mount_id": mount["id"],
+                "folder_name": w.folder_name,
+                "done": done,
+                "stale": stale,
+            })
+            n_total += 1
+            n_done += 1 if done else 0
+    return {"wells": rows, "n_total": n_total, "n_done": n_done}
+
+
+@app.post("/api/track-run")
+def track_run(min_frac: float = 0.75) -> dict:
+    import subprocess, sys, threading, time as _t
+    global _track_job_lock
+    if _track_job_lock is None:
+        _track_job_lock = threading.Lock()
+    with _track_job_lock:
+        proc = _track_job["proc"]
+        if proc is not None and proc.poll() is None:
+            return {"started": False, "running": True, "pid": proc.pid}
+        cmd = [sys.executable, "-u", "scripts/cellpose_track.py",
+               "--min-frac", str(min_frac)]
+        try:
+            proc = subprocess.Popen(
+                cmd, cwd=str(Path.cwd()),
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1,
+            )
+        except OSError as e:
+            raise HTTPException(status_code=500, detail=f"spawn failed: {e}")
+        _track_job.update({
+            "proc": proc, "started_at": _t.time(), "stopped_at": None,
+            "returncode": None, "last_log": [], "last_line": "starting…",
+        })
+        threading.Thread(target=_make_reader(_track_job, _track_job_lock),
+                         args=(proc,), daemon=True).start()
+    return {"started": True, "running": True, "pid": proc.pid}
+
+
+@app.post("/api/track-cancel")
+def track_cancel() -> dict:
+    if _track_job_lock is None:
+        return {"running": False, "stopped": False}
+    with _track_job_lock:
+        proc = _track_job["proc"]
+        if proc is None or proc.poll() is not None:
+            return {"running": False, "stopped": False}
+        try:
+            proc.terminate()
+        except OSError:
+            pass
+    return {"running": False, "stopped": True}
+
+
+@app.get("/api/track-job")
+def track_job() -> dict:
+    if _track_job_lock is None:
+        return {"running": False, "pid": None, "started_at": None,
+                "stopped_at": None, "returncode": None,
+                "last_line": "", "last_log": []}
+    with _track_job_lock:
+        proc = _track_job["proc"]
+        running = bool(proc and proc.poll() is None)
+        return {
+            "running": running,
+            "pid": proc.pid if proc else None,
+            "started_at": _track_job["started_at"],
+            "stopped_at": _track_job["stopped_at"],
+            "returncode": _track_job["returncode"],
+            "last_line": _track_job["last_line"],
+            "last_log": list(_track_job["last_log"]),
+        }
+
+
+@app.get("/api/tracks")
+def tracks_for_well(mount_id: str, folder_name: str) -> dict:
+    """The full tracks JSON for one well, used by the viewer to colour
+    overlays and to plot growth curves."""
+    safe = folder_name.replace("/", "_")
+    path = _TRACKS_ROOT / f"{safe}.json"
+    if not path.is_file():
+        return {"available": False, "tracks": [], "n_frames": 0}
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return {"available": False, "tracks": [], "n_frames": 0}
+    data["available"] = True
+    return data
+
+
+@app.get("/api/track-stitch")
+def track_stitch(mount_id: str, folder_name: str, track_id: int,
+                  pad: float = 1.4) -> Response:
+    """For one track, crop a square region around its centre in every frame
+    where it appears and concatenate horizontally into a wide PNG. The crop
+    side equals 2 * (largest_r in this track) * pad, so the organoid stays
+    fully visible even in its biggest frame. Coordinates are aligned-canvas."""
+    _, well = _find_well(mount_id, folder_name)
+    safe = folder_name.replace("/", "_")
+    path = _TRACKS_ROOT / f"{safe}.json"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="no tracks file for well")
+    data = json.loads(path.read_text())
+    track = next((t for t in data.get("tracks", []) if t["id"] == track_id), None)
+    if track is None:
+        raise HTTPException(status_code=404, detail=f"no track {track_id}")
+    dets = track.get("detections", [])
+    if not dets:
+        raise HTTPException(status_code=404, detail="track has no detections")
+
+    # Crop size — anchored on the largest detection in this track so the
+    # organoid never gets clipped, with `pad` of slack for context.
+    largest = max(dets, key=lambda d: d.get("r", 0))
+    side = int(round(2 * largest["r"] * pad))
+    side = max(side, 32)  # minimum crop so tiny early-life tracks are visible
+
+    # Load the aligned frame for every detection and crop.
+    align = _well_alignment(*_find_well(mount_id, folder_name))
+    panels: list[np.ndarray] = []
+    label_strip_h = 18
+    sep_w = 2
+    for d in dets:
+        tp = next((t for t in well.timepoints if t.label == d["label"]), None)
+        if tp is None:
+            continue
+        # Use the cached _read_aligned helper via building the key.
+        key = f"{mount_id}/{well.folder_name}/{tp.path.name}"
+        try:
+            frame = _read_aligned(key)
+        except HTTPException:
+            continue
+        if frame.ndim == 2:
+            frame = np.stack([frame] * 3, axis=-1)
+        if frame.dtype != np.uint8:
+            frame = np.clip(frame[..., :3], 0, 255).astype(np.uint8)
+        H, W = frame.shape[:2]
+        cx, cy = int(round(d["cx"])), int(round(d["cy"]))
+        x0 = max(0, cx - side // 2); x1 = min(W, x0 + side)
+        y0 = max(0, cy - side // 2); y1 = min(H, y0 + side)
+        crop = frame[y0:y1, x0:x1, :3]
+        # Pad to (side, side) if we hit a border.
+        if crop.shape[0] != side or crop.shape[1] != side:
+            full = np.zeros((side, side, 3), dtype=np.uint8)
+            full[:crop.shape[0], :crop.shape[1]] = crop
+            crop = full
+        # Label strip on top.
+        strip = np.zeros((label_strip_h, side, 3), dtype=np.uint8)
+        cv2.putText(strip, d["label"], (4, 13), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.42, (255, 255, 255), 1, cv2.LINE_AA)
+        panel = np.vstack([strip, crop])
+        panels.append(panel)
+
+    if not panels:
+        raise HTTPException(status_code=404, detail="no panels rendered")
+
+    sep = np.full((panels[0].shape[0], sep_w, 3), 36, dtype=np.uint8)
+    pieces = []
+    for i, p in enumerate(panels):
+        if i > 0:
+            pieces.append(sep)
+        pieces.append(p)
+    big = np.concatenate(pieces, axis=1)
+    # Header strip with track meta.
+    hdr = np.zeros((22, big.shape[1], 3), dtype=np.uint8)
+    text = (f"track {track_id}  ·  n={len(dets)}  ·  "
+            f"crop={side}px (largest r={largest['r']:.0f})")
+    cv2.putText(hdr, text, (6, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.50,
+                (220, 220, 220), 1, cv2.LINE_AA)
+    big = np.vstack([hdr, big])
+
+    bgr = cv2.cvtColor(big, cv2.COLOR_RGB2BGR)
+    ok, buf = cv2.imencode(".png", bgr)
+    if not ok:
+        raise HTTPException(status_code=500, detail="png encode failed")
+    return Response(content=buf.tobytes(), media_type="image/png")
+
+
+@app.get("/api/well-growth")
+def well_growth(mount_id: str, folder_name: str, valid_only: int = 1) -> dict:
+    """Per-track normalised area-over-time, ready for plotting.
+    Returns {tracks: [{id, valid, color_index, points: [{minutes, area_px,
+    norm}, ...]}, ...]}. norm = area_px / area_px_at_first_detection."""
+    _, well = _find_well(mount_id, folder_name)
+    safe = folder_name.replace("/", "_")
+    path = _TRACKS_ROOT / f"{safe}.json"
+    if not path.is_file():
+        return {"available": False, "tracks": []}
+    data = json.loads(path.read_text())
+    tp_minutes = {tp.label: tp.minutes for tp in well.timepoints}
+    out: list[dict] = []
+    for t in data.get("tracks", []):
+        if valid_only and not t.get("valid"):
+            continue
+        dets = t.get("detections", [])
+        if not dets:
+            continue
+        a0 = dets[0].get("area_px")
+        if not a0:
+            continue
+        points = []
+        for d in dets:
+            mn = tp_minutes.get(d["label"])
+            ap = d.get("area_px")
+            if mn is None or ap is None:
+                continue
+            points.append({"minutes": int(mn), "area_px": int(ap),
+                            "norm": float(ap) / float(a0)})
+        if not points:
+            continue
+        out.append({
+            "id": t["id"], "valid": bool(t.get("valid")),
+            "n_detections": t.get("n_detections", len(points)),
+            "points": points,
+        })
+    return {"available": True, "tracks": out,
+            "n_frames": data.get("n_frames", 0)}
+
+
+# ---------------------- alignment run / cancel ----------------------
+
+_align_job: dict = {
+    "proc": None, "started_at": None, "stopped_at": None,
+    "returncode": None, "last_log": [], "last_line": "",
+}
+_align_job_lock = None  # set after threading import below
+
+
+def _make_reader(state: dict, lock):
+    def _reader(proc):
+        for raw in iter(proc.stdout.readline, b""):
+            line = raw.decode(errors="replace").rstrip()
+            if not line:
+                continue
+            with lock:
+                state["last_line"] = line
+                state["last_log"].append(line)
+                if len(state["last_log"]) > 30:
+                    state["last_log"].pop(0)
+        proc.stdout.close(); proc.wait()
+        with lock:
+            state["returncode"] = proc.returncode
+            import time as _t
+            state["stopped_at"] = _t.time()
+    return _reader
+
+
+@app.get("/api/align-status")
+def align_status() -> dict:
+    """Per-well: is the alignment cache currently valid? Drives the UI bar."""
+    rows = []
+    n_total = 0; n_done = 0
+    for mount in _mounts():
+        try:
+            spec = _wells_for_mount(mount)
+        except Exception:  # noqa: BLE001
+            continue
+        for w in spec.wells:
+            paths = [tp.path for tp in w.timepoints]
+            cached = is_alignment_cached(paths)
+            rows.append({
+                "mount_id": mount["id"],
+                "folder_name": w.folder_name,
+                "cached": cached,
+            })
+            n_total += 1
+            n_done += 1 if cached else 0
+    return {"wells": rows, "n_total": n_total, "n_done": n_done}
+
+
+@app.post("/api/align-run")
+def align_run(force: bool = False) -> dict:
+    import subprocess, sys, threading, time as _t
+    global _align_job_lock
+    if _align_job_lock is None:
+        _align_job_lock = threading.Lock()
+    with _align_job_lock:
+        proc = _align_job["proc"]
+        if proc is not None and proc.poll() is None:
+            return {"started": False, "running": True, "pid": proc.pid}
+        cmd = [sys.executable, "-u", "scripts/align_batch.py"]
+        if force:
+            cmd.append("--force")
+        try:
+            proc = subprocess.Popen(
+                cmd, cwd=str(Path.cwd()),
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1,
+            )
+        except OSError as e:
+            raise HTTPException(status_code=500, detail=f"spawn failed: {e}")
+        _align_job.update({
+            "proc": proc, "started_at": _t.time(), "stopped_at": None,
+            "returncode": None, "last_log": [], "last_line": "starting…",
+        })
+        threading.Thread(target=_make_reader(_align_job, _align_job_lock),
+                         args=(proc,), daemon=True).start()
+    return {"started": True, "running": True, "pid": proc.pid}
+
+
+@app.post("/api/align-cancel")
+def align_cancel() -> dict:
+    if _align_job_lock is None:
+        return {"running": False, "stopped": False}
+    with _align_job_lock:
+        proc = _align_job["proc"]
+        if proc is None or proc.poll() is not None:
+            return {"running": False, "stopped": False}
+        try:
+            proc.terminate()
+        except OSError:
+            pass
+    return {"running": False, "stopped": True}
+
+
+@app.get("/api/align-job")
+def align_job() -> dict:
+    if _align_job_lock is None:
+        return {"running": False, "pid": None, "started_at": None,
+                "stopped_at": None, "returncode": None,
+                "last_line": "", "last_log": []}
+    with _align_job_lock:
+        proc = _align_job["proc"]
+        running = bool(proc and proc.poll() is None)
+        return {
+            "running": running,
+            "pid": proc.pid if proc else None,
+            "started_at": _align_job["started_at"],
+            "stopped_at": _align_job["stopped_at"],
+            "returncode": _align_job["returncode"],
+            "last_line": _align_job["last_line"],
+            "last_log": list(_align_job["last_log"]),
+        }
 
 
 # ---------------------- cellpose run / cancel ----------------------
@@ -518,10 +891,12 @@ def cellpose_job() -> dict:
         }
 
 
-@app.get("/api/cellpose-circles")
-def cellpose_circles(key: str) -> dict:
-    """Return cached Cellpose circles for one frame. Coordinates are in the
-    aligned-canvas space (which matches what /api/image?aligned=1 serves)."""
+@app.get("/api/cellpose-edges")
+def cellpose_edges(key: str, aligned: int = 1) -> Response:
+    """Boundaries of the cached cellpose mask, returned as a transparent
+    PNG. aligned=1 returns the full canvas-sized boundary image;
+    aligned=0 returns the boundary cropped back to the raw frame so it
+    lines up with /api/image (no aligned padding)."""
     mount, rest = _split_key(key)
     parts = rest.split("/", 1)
     if len(parts) != 2:
@@ -531,7 +906,61 @@ def cellpose_circles(key: str) -> dict:
     well = next((w for w in spec.wells if w.folder_name == well_folder), None)
     if well is None:
         raise HTTPException(status_code=404, detail="well not found")
-    tp = next((t for t in well.timepoints if t.path.name == filename), None)
+    t_idx, tp = _well_tp_index(mount, well, filename)
+    if tp is None:
+        raise HTTPException(status_code=404, detail="timepoint not found")
+    safe_well = well_folder.replace("/", "_")
+    mask_path = _CELLPOSE_CACHE_ROOT / safe_well / f"{tp.label}.mask.png"
+    if not mask_path.is_file():
+        bgra = np.zeros((1, 1, 4), dtype=np.uint8)
+        ok, png = cv2.imencode(".png", bgra)
+        return Response(content=png.tobytes(), media_type="image/png")
+    masks = cv2.imread(str(mask_path), cv2.IMREAD_UNCHANGED)
+    if masks is None:
+        raise HTTPException(status_code=500, detail="bad mask png")
+    boundary = find_boundaries(masks, mode="thick")
+
+    if not aligned:
+        align = _well_alignment(mount, well)
+        if align.placements:
+            y0, x0 = align.placements[t_idx]
+            img = imread(_safe_image_path(key))
+            raw_h, raw_w = (img.shape[0], img.shape[1]) if img.ndim >= 2 else boundary.shape
+            boundary = boundary[y0:y0 + raw_h, x0:x0 + raw_w]
+
+    h, w = boundary.shape
+    bgra = np.zeros((h, w, 4), dtype=np.uint8)
+    bgra[boundary] = [72, 86, 255, 255]
+    ok, png = cv2.imencode(".png", bgra)
+    if not ok:
+        raise HTTPException(status_code=500, detail="png encode failed")
+    return Response(content=png.tobytes(), media_type="image/png")
+
+
+def _well_tp_index(mount, well, filename):
+    for i, t in enumerate(well.timepoints):
+        if t.path.name == filename:
+            return i, t
+    return None, None
+
+
+@app.get("/api/cellpose-circles")
+def cellpose_circles(key: str, aligned: int = 1) -> dict:
+    """Return cached Cellpose circles for one frame.
+    aligned=1 → coordinates in the aligned-canvas space (matches the
+    aligned image served by /api/image?aligned=1).
+    aligned=0 → coordinates shifted into the raw image space, and
+    circles whose centre falls outside the raw image are dropped."""
+    mount, rest = _split_key(key)
+    parts = rest.split("/", 1)
+    if len(parts) != 2:
+        raise HTTPException(status_code=400, detail="bad key")
+    well_folder, filename = parts
+    spec = _wells_for_mount(mount)
+    well = next((w for w in spec.wells if w.folder_name == well_folder), None)
+    if well is None:
+        raise HTTPException(status_code=404, detail="well not found")
+    t_idx, tp = _well_tp_index(mount, well, filename)
     if tp is None:
         raise HTTPException(status_code=404, detail="timepoint not found")
     safe_well = well_folder.replace("/", "_")
@@ -544,10 +973,25 @@ def cellpose_circles(key: str) -> dict:
         return {"cached": False, "circles": []}
     align = _well_alignment(mount, well)
     h, w = align.canvas_shape if align.canvas_shape else (0, 0)
+    circles = data.get("circles", [])
+
+    if not aligned and align.placements:
+        y0, x0 = align.placements[t_idx]
+        # Raw image dimensions — we need them to clip.
+        img = imread(_safe_image_path(key))
+        raw_h, raw_w = (img.shape[0], img.shape[1]) if img.ndim >= 2 else (0, 0)
+        shifted = []
+        for c in circles:
+            cx2, cy2 = c["cx"] - x0, c["cy"] - y0
+            if 0 <= cx2 < raw_w and 0 <= cy2 < raw_h:
+                shifted.append({**c, "cx": cx2, "cy": cy2})
+        circles = shifted
+        w, h = raw_w, raw_h
+
     return {
         "cached": True,
         "model": data.get("model", "cpsam"),
-        "circles": data.get("circles", []),
+        "circles": circles,
         "width": int(w),
         "height": int(h),
     }
