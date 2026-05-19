@@ -19,14 +19,9 @@ from starlette.requests import Request
 
 from cellyoulite.__version__ import __version__
 from cellyoulite.io.grid import discover_grid
-from cellyoulite.pipeline import analyze_folder, fit_circle, passes_qc, segment_image
-from cellyoulite.pipeline.circle_fit import fit_circle as _fit_circle
-from cellyoulite.pipeline.qc import QCThresholds, passes_qc as _passes_qc
-from cellyoulite.pipeline.segment import segment_image as _segment
 from cellyoulite.pipeline.align import (
     WellAlignment, compute_alignment_cached, is_alignment_cached, paste_onto_canvas,
 )
-from cellyoulite.plotting.boxplot import boxplot_by_timepoint, well_lineplot
 
 _WEB = Path(__file__).resolve().parent.parent / "web"
 templates = Jinja2Templates(directory=str(_WEB / "templates"))
@@ -269,44 +264,6 @@ def image(key: str, thumb: int = 0, aligned: int = 0) -> Response:
     return Response(content=buf.tobytes(), media_type="image/jpeg")
 
 
-@app.get("/api/overlay")
-def overlay(key: str, aligned: int = 0) -> dict:
-    img = _read_aligned(key) if aligned else imread(_safe_image_path(key))
-    seg = segment_image(img)
-
-    circles: list[dict] = []
-    for idx, region in enumerate(seg.regions):
-        if not passes_qc(region):
-            continue
-        obj_mask = seg.labels == (idx + 1)
-        fit = fit_circle(obj_mask)
-        circles.append({"cx": fit.cx, "cy": fit.cy, "r": fit.radius})
-
-    h, w = seg.mask.shape
-    return {"width": int(w), "height": int(h),
-            "circles": circles, "n_passed": len(circles)}
-
-
-@app.get("/api/edges")
-def edges(key: str, aligned: int = 0) -> Response:
-    img = _read_aligned(key) if aligned else imread(_safe_image_path(key))
-    seg = segment_image(img)
-
-    qc_mask = np.zeros_like(seg.mask, dtype=bool)
-    for idx, region in enumerate(seg.regions):
-        if passes_qc(region):
-            qc_mask |= seg.labels == (idx + 1)
-
-    boundary = find_boundaries(qc_mask, mode="thick")
-    h, w = boundary.shape
-    bgra = np.zeros((h, w, 4), dtype=np.uint8)
-    bgra[boundary] = [72, 86, 255, 255]
-    ok, png = cv2.imencode(".png", bgra)
-    if not ok:
-        raise HTTPException(status_code=500, detail="png encode failed")
-    return Response(content=png.tobytes(), media_type="image/png")
-
-
 @app.get("/api/well-align")
 def well_align(mount_id: str, folder_name: str) -> dict:
     mount, w = _find_well(mount_id, folder_name)
@@ -318,55 +275,6 @@ def well_align(mount_id: str, folder_name: str) -> dict:
     }
 
 
-@app.get("/api/well-analyze")
-def well_analyze(mount_id: str, folder_name: str) -> JSONResponse:
-    import pandas as pd
-    _, w = _find_well(mount_id, folder_name)
-
-    qc = QCThresholds()
-    rows: list[dict] = []
-    for t_idx, tp in enumerate(w.timepoints):
-        img = imread(tp.path)
-        seg = _segment(img, min_area_px=qc.min_area_px, max_area_px=qc.max_area_px)
-        for idx, region in enumerate(seg.regions):
-            if not _passes_qc(region, qc):
-                continue
-            obj_mask = seg.labels == (idx + 1)
-            circle = _fit_circle(obj_mask)
-            rows.append({
-                "t_idx": t_idx,
-                "minutes": tp.minutes,
-                "label": tp.label,
-                "area_px": int(region.area),
-                "circle_area_px": circle.area,
-            })
-    df = pd.DataFrame.from_records(rows)
-    return JSONResponse({
-        "n_organoids": int(len(df)),
-        "plot_html": well_lineplot(df) if len(df) else "",
-    })
-
-
-@app.get("/api/analyze")
-def analyze() -> JSONResponse:
-    import pandas as pd
-    frames = []
-    for mount in _mounts():
-        df = analyze_folder(Path(mount["path"]))
-        if len(df):
-            df = df.copy()
-            df["mount"] = mount["alias"]
-            frames.append(df)
-    df = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-    plot_html = boxplot_by_timepoint(df) if len(df) else ""
-    return JSONResponse({
-        "n_organoids": int(len(df)),
-        "treatments": sorted(df["treatment"].unique().tolist()) if len(df) else [],
-        "n_timepoints": int(df["t_idx"].nunique()) if len(df) else 0,
-        "median_area_px": float(df["area_px"].median()) if len(df) else None,
-        "plot_html": plot_html,
-        "rows": df.head(20).to_dict(orient="records"),
-    })
 
 
 # ---------------------- alignment warm-up ----------------------
@@ -462,6 +370,7 @@ def track_status() -> dict:
                 "folder_name": w.folder_name,
                 "done": done,
                 "stale": stale,
+                "human_validated": _is_human_validated(w.folder_name),
             })
             n_total += 1
             n_done += 1 if done else 0
@@ -531,6 +440,75 @@ def track_job() -> dict:
         }
 
 
+def _validation_path(well_folder: str) -> Path:
+    safe = well_folder.replace("/", "_")
+    return _TRACKS_ROOT / f"{safe}__validation.json"
+
+
+def _load_validation_raw(well_folder: str) -> dict:
+    p = _validation_path(well_folder)
+    if not p.is_file():
+        return {}
+    try:
+        return json.loads(p.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _load_validation(well_folder: str) -> dict[int, bool]:
+    data = _load_validation_raw(well_folder)
+    return {int(k): bool(v) for k, v in data.get("overrides", {}).items()}
+
+
+def _is_human_validated(well_folder: str) -> bool:
+    return bool(_load_validation_raw(well_folder).get("human_validated"))
+
+
+@app.get("/api/track-validation")
+def get_track_validation(mount_id: str, folder_name: str) -> dict:
+    """Manual user overrides on whether a track is valid for analysis.
+    Maps track_id -> bool (true=accepted, false=rejected). Auto-classified
+    tracks fall back to their script-assigned `valid` field if no override.
+    Also returns `human_validated` — whether a human has signed off on the
+    whole well via the Validate button."""
+    overrides = _load_validation(folder_name)
+    return {"well": folder_name,
+            "overrides": {str(k): v for k, v in overrides.items()},
+            "human_validated": _is_human_validated(folder_name)}
+
+
+@app.post("/api/track-validation")
+def set_track_validation(mount_id: str, folder_name: str,
+                          body: dict = Body(...)) -> dict:
+    """Update the validation state for a well. Body may contain:
+      - overrides: {id: bool}  → replaces the per-track override map
+      - human_validated: bool   → flips the well-level sign-off
+
+    Either field may be omitted; existing values are preserved when so."""
+    existing = _load_validation_raw(folder_name)
+    # overrides: replace if provided
+    if "overrides" in body:
+        raw = body.get("overrides") or {}
+        cleaned: dict[str, bool] = {}
+        for k, v in raw.items():
+            try:
+                cleaned[str(int(k))] = bool(v)
+            except (TypeError, ValueError):
+                continue
+        existing["overrides"] = cleaned
+    else:
+        existing.setdefault("overrides", {})
+    # human_validated: flip if provided
+    if "human_validated" in body:
+        existing["human_validated"] = bool(body["human_validated"])
+    existing["well"] = folder_name
+    _TRACKS_ROOT.mkdir(parents=True, exist_ok=True)
+    _validation_path(folder_name).write_text(json.dumps(existing, indent=2))
+    return {"ok": True,
+            "n_overrides": len(existing.get("overrides", {})),
+            "human_validated": bool(existing.get("human_validated"))}
+
+
 @app.get("/api/tracks")
 def tracks_for_well(mount_id: str, folder_name: str) -> dict:
     """The full tracks JSON for one well, used by the viewer to colour
@@ -549,13 +527,20 @@ def tracks_for_well(mount_id: str, folder_name: str) -> dict:
 
 @app.get("/api/track-stitch")
 def track_stitch(mount_id: str, folder_name: str, track_id: int,
-                  pad: float = 1.4) -> Response:
+                  variant: str = "both", pad: float = 1.4) -> Response:
     """For one track, crop a square region around its centre in every frame
-    where it appears and concatenate horizontally into a wide PNG. The crop
-    side equals 2 * (largest_r in this track) * pad, so the organoid stays
-    fully visible even in its biggest frame. Coordinates are aligned-canvas."""
-    _, well = _find_well(mount_id, folder_name)
+    where it appears and concatenate horizontally into a wide PNG.
+    variant=raw → just the raw row; variant=seg → just the segmented row;
+    variant=both → two rows stacked (default). Cached versions from the
+    tracking script are served when available."""
+    if variant not in ("raw", "seg", "both"):
+        raise HTTPException(status_code=400, detail="variant must be raw/seg/both")
     safe = folder_name.replace("/", "_")
+    cached = _TRACKS_ROOT / safe / f"track_{track_id}_{variant}.png"
+    if cached.is_file() and variant in ("raw", "seg"):
+        return FileResponse(cached, media_type="image/png")
+
+    _, well = _find_well(mount_id, folder_name)
     path = _TRACKS_ROOT / f"{safe}.json"
     if not path.is_file():
         raise HTTPException(status_code=404, detail="no tracks file for well")
@@ -567,22 +552,312 @@ def track_stitch(mount_id: str, folder_name: str, track_id: int,
     if not dets:
         raise HTTPException(status_code=404, detail="track has no detections")
 
-    # Crop size — anchored on the largest detection in this track so the
-    # organoid never gets clipped, with `pad` of slack for context.
-    largest = max(dets, key=lambda d: d.get("r", 0))
-    side = int(round(2 * largest["r"] * pad))
-    side = max(side, 32)  # minimum crop so tiny early-life tracks are visible
+    # Use the shared renderer (same code path the tracking script uses to
+    # cache stitches). Replaces the inline implementation below.
+    safe_well = well.folder_name.replace("/", "_")
 
-    # Load the aligned frame for every detection and crop.
-    align = _well_alignment(*_find_well(mount_id, folder_name))
-    panels: list[np.ndarray] = []
-    label_strip_h = 18
-    sep_w = 2
-    for d in dets:
-        tp = next((t for t in well.timepoints if t.label == d["label"]), None)
+    def _load_frame(label: str):
+        tp = next((t for t in well.timepoints if t.label == label), None)
         if tp is None:
+            return None
+        key = f"{mount_id}/{well.folder_name}/{tp.path.name}"
+        try:
+            return _read_aligned(key)
+        except HTTPException:
+            return None
+
+    def _load_mask(label: str):
+        p = _CELLPOSE_CACHE_ROOT / safe_well / f"{label}.mask.png"
+        if not p.is_file():
+            return None
+        return cv2.imread(str(p), cv2.IMREAD_UNCHANGED)
+
+    from cellyoulite.pipeline.track_stitch import render_track_strips
+    strips = render_track_strips(
+        track_id=track_id, detections=dets,
+        load_frame=_load_frame, load_mask=_load_mask, pad=pad,
+    )
+    if not strips:
+        raise HTTPException(status_code=404, detail="no panels rendered")
+    return Response(content=strips[variant], media_type="image/png")
+
+
+@app.get("/api/track-gif")
+def track_gif(mount_id: str, folder_name: str, track_id: int,
+               variant: str = "seg", fps: int = 4, pad: float = 1.4) -> Response:
+    """Animated GIF of one track: each detection is a single frame, cropped
+    to the track's largest size and (when variant=seg) tinted with the
+    track's hue."""
+    if variant not in ("raw", "seg"):
+        raise HTTPException(status_code=400, detail="variant must be raw or seg")
+    _, well = _find_well(mount_id, folder_name)
+    safe = folder_name.replace("/", "_")
+    tracks_path = _TRACKS_ROOT / f"{safe}.json"
+    if not tracks_path.is_file():
+        raise HTTPException(status_code=404, detail="no tracks for well")
+    data = json.loads(tracks_path.read_text())
+    track = next((t for t in data.get("tracks", []) if t["id"] == track_id), None)
+    if track is None:
+        raise HTTPException(status_code=404, detail=f"no track {track_id}")
+    dets = track.get("detections", [])
+    if not dets:
+        raise HTTPException(status_code=404, detail="track has no detections")
+
+    def _load_frame(label: str):
+        tp = next((t for t in well.timepoints if t.label == label), None)
+        if tp is None:
+            return None
+        key = f"{mount_id}/{well.folder_name}/{tp.path.name}"
+        try:
+            return _read_aligned(key)
+        except HTTPException:
+            return None
+
+    def _load_mask(label: str):
+        p = _CELLPOSE_CACHE_ROOT / safe / f"{label}.mask.png"
+        if not p.is_file():
+            return None
+        return cv2.imread(str(p), cv2.IMREAD_UNCHANGED)
+
+    from cellyoulite.pipeline.track_stitch import render_track_gif as _render_gif
+    buf = _render_gif(
+        track_id=track_id, detections=dets,
+        load_frame=_load_frame, load_mask=_load_mask,
+        well_name=well.folder_name,
+        variant=variant, pad=pad, fps=fps,
+    )
+    if not buf:
+        raise HTTPException(status_code=404, detail="no frames")
+    headers = {
+        "Content-Disposition":
+            f'attachment; filename="{safe}_track_{track_id}_{variant}.gif"'
+    }
+    return Response(content=buf, media_type="image/gif", headers=headers)
+
+
+@app.get("/api/growth-csv")
+def growth_csv(treatment: str | None = None) -> Response:
+    """Long-format CSV of every accepted track-frame observation, suitable
+    for loading into R as `read.csv(...)`.
+
+    Columns:
+      treatment, replicate, well, track_id, valid_auto, accepted,
+      t_idx, minutes, label, area_px, area_px_t0, log2_fold
+    """
+    import csv
+    import io
+    import math
+
+    spec_wells: list = []
+    for mount in _mounts():
+        try:
+            spec = _wells_for_mount(mount)
+        except Exception:  # noqa: BLE001
             continue
-        # Use the cached _read_aligned helper via building the key.
+        for w in spec.wells:
+            if treatment is None or w.treatment == treatment:
+                spec_wells.append(w)
+
+    buf = io.StringIO()
+    writer = csv.writer(buf, lineterminator="\n")
+    writer.writerow([
+        "treatment", "replicate", "well", "track_id",
+        "valid_auto", "accepted",
+        "t_idx", "minutes", "label",
+        "area_px", "area_px_t0", "log2_fold",
+    ])
+    for w in spec_wells:
+        safe = w.folder_name.replace("/", "_")
+        tpath = _TRACKS_ROOT / f"{safe}.json"
+        if not tpath.is_file():
+            continue
+        try:
+            data = json.loads(tpath.read_text())
+        except (OSError, ValueError):
+            continue
+        overrides = _load_validation(w.folder_name)
+        tp_minutes = {tp.label: tp.minutes for tp in w.timepoints}
+        for tr in data.get("tracks", []):
+            valid_auto = bool(tr.get("valid"))
+            accepted = overrides.get(tr["id"], valid_auto)
+            # Only export accepted tracks — rejected ones aren't useful for
+            # downstream analysis and clutter the data frame.
+            if not accepted:
+                continue
+            dets = tr.get("detections", [])
+            if not dets:
+                continue
+            a0 = dets[0].get("area_px")
+            if not a0:
+                continue
+            for d in dets:
+                ap = d.get("area_px")
+                mn = tp_minutes.get(d["label"])
+                if mn is None or not ap:
+                    continue
+                writer.writerow([
+                    w.treatment, w.replicate, w.folder_name, tr["id"],
+                    "TRUE" if valid_auto else "FALSE",
+                    "TRUE" if accepted else "FALSE",
+                    d.get("t_idx", ""), int(mn), d["label"],
+                    int(ap), int(a0),
+                    f"{math.log2(ap / a0):.6f}",
+                ])
+
+    name = "growth" + (f"_{treatment.replace(' ', '_')}" if treatment else "_all") + ".csv"
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{name}"'},
+    )
+
+
+@app.get("/api/boxplot-data")
+def boxplot_data(treatment: str | None = None, by_replicate: int = 0) -> dict:
+    """Pool every accepted track from every replicate of each requested
+    treatment, normalise to log2(area / area@t0), and return per-treatment
+    per-timepoint box statistics. When by_replicate=1, replicates are kept
+    as separate series within each treatment."""
+    import math
+
+    spec_wells: list = []
+    for mount in _mounts():
+        try:
+            spec = _wells_for_mount(mount)
+        except Exception:  # noqa: BLE001
+            continue
+        for w in spec.wells:
+            if treatment is None or w.treatment == treatment:
+                spec_wells.append(w)
+    if not spec_wells:
+        return {"treatments": [], "boxes": [], "minutes": [], "replicates": []}
+
+    # (treatment, replicate_or_None) -> minutes -> [log2 values]
+    bucket: dict[tuple, dict[int, list[float]]] = {}
+    minutes_seen: set[int] = set()
+
+    for w in spec_wells:
+        safe = w.folder_name.replace("/", "_")
+        tpath = _TRACKS_ROOT / f"{safe}.json"
+        if not tpath.is_file():
+            continue
+        try:
+            data = json.loads(tpath.read_text())
+        except (OSError, ValueError):
+            continue
+        overrides = _load_validation(w.folder_name)
+        tp_minutes = {tp.label: tp.minutes for tp in w.timepoints}
+        key = (w.treatment, w.replicate if by_replicate else None)
+        for tr in data.get("tracks", []):
+            accepted = overrides.get(tr["id"], bool(tr.get("valid")))
+            if not accepted:
+                continue
+            dets = tr.get("detections", [])
+            if not dets:
+                continue
+            a0 = dets[0].get("area_px")
+            if not a0:
+                continue
+            for d in dets:
+                ap = d.get("area_px")
+                mn = tp_minutes.get(d["label"])
+                if mn is None or not ap:
+                    continue
+                fold = math.log2(ap / a0)
+                bucket.setdefault(key, {}).setdefault(int(mn), []).append(fold)
+                minutes_seen.add(int(mn))
+
+    def _box(values: list[float]) -> dict:
+        if not values:
+            return {}
+        vs = sorted(values)
+        def pct(p):
+            if len(vs) == 1: return vs[0]
+            k = (len(vs) - 1) * p
+            f = int(k); c = f + 1
+            if c >= len(vs): return vs[-1]
+            return vs[f] + (vs[c] - vs[f]) * (k - f)
+        q1, q2, q3 = pct(0.25), pct(0.50), pct(0.75)
+        iqr = q3 - q1
+        lo_whisker = max(vs[0], q1 - 1.5 * iqr)
+        hi_whisker = min(vs[-1], q3 + 1.5 * iqr)
+        outliers = [v for v in vs if v < lo_whisker or v > hi_whisker]
+        return {"n": len(vs), "median": q2, "q1": q1, "q3": q3,
+                "lo": lo_whisker, "hi": hi_whisker,
+                "outliers": outliers[:50]}  # cap outliers so payload stays light
+
+    boxes = []
+    treatments_set: set[str] = set()
+    replicates_set: set[int] = set()
+    for key, by_min in sorted(bucket.items()):
+        tx, rep = key
+        treatments_set.add(tx)
+        if rep is not None:
+            replicates_set.add(rep)
+        for mn in sorted(by_min):
+            stats = _box(by_min[mn])
+            if not stats:
+                continue
+            stats["treatment"] = tx
+            stats["minutes"] = mn
+            if rep is not None:
+                stats["replicate"] = rep
+            boxes.append(stats)
+    return {
+        "treatments": sorted(treatments_set),
+        "replicates": sorted(replicates_set),
+        "minutes": sorted(minutes_seen),
+        "boxes": boxes,
+        "by_replicate": bool(by_replicate),
+    }
+
+
+@app.get("/api/well-gif")
+def well_gif(mount_id: str, folder_name: str,
+              max_width: int = 800, fps: int = 4,
+              accepted_only: int = 1, labels: int = 1) -> Response:
+    """Animated GIF of every aligned frame in a well, with accepted tracks
+    coloured (boundary + semi-transparent fill in each track's hue). The
+    aligned canvas naturally pads with black where frames have shifted, so
+    that shows up as borders in the GIF."""
+    import io
+    import imageio.v2 as imageio
+    from skimage.transform import resize as _resize
+
+    mount, well = _find_well(mount_id, folder_name)
+    spec = _wells_for_mount(mount)
+    safe = folder_name.replace("/", "_")
+
+    # Tracks + validation overrides → which (track_id, valid) per frame.
+    tracks_path = _TRACKS_ROOT / f"{safe}.json"
+    if not tracks_path.is_file():
+        raise HTTPException(status_code=404, detail="no tracks file")
+    tdata = json.loads(tracks_path.read_text())
+    overrides = _load_validation(folder_name)
+
+    # Per-frame label→(track_id, hue_rgb). Build once.
+    align = _well_alignment(mount, well)
+    H_full, W_full = align.canvas_shape
+    fill_alpha = 0.32
+    # Compute per-frame index of (track_id, accepted, hue) for fast lookup.
+    per_frame_tracks: dict[int, list[dict]] = {}
+    for tr in tdata.get("tracks", []):
+        accepted = overrides.get(tr["id"], bool(tr.get("valid")))
+        if accepted_only and not accepted:
+            continue
+        rb, rg, r_ = _hue_for_track(tr["id"])  # returns bgr
+        # _hue_for_track in this file returns (b, g, r); convert to rgb
+        hue_rgb = np.array([r_, rg, rb], dtype=np.float32)
+        for det in tr.get("detections", []):
+            per_frame_tracks.setdefault(det["t_idx"], []).append({
+                "track_id": tr["id"], "cx": det["cx"], "cy": det["cy"],
+                "hue": hue_rgb,
+            })
+
+    from cellyoulite.pipeline.track_stitch import make_label_fmt
+    fmt_label = make_label_fmt([tp.label for tp in well.timepoints])
+    frames_out: list[np.ndarray] = []
+    for i, tp in enumerate(well.timepoints):
         key = f"{mount_id}/{well.folder_name}/{tp.path.name}"
         try:
             frame = _read_aligned(key)
@@ -592,46 +867,76 @@ def track_stitch(mount_id: str, folder_name: str, track_id: int,
             frame = np.stack([frame] * 3, axis=-1)
         if frame.dtype != np.uint8:
             frame = np.clip(frame[..., :3], 0, 255).astype(np.uint8)
-        H, W = frame.shape[:2]
-        cx, cy = int(round(d["cx"])), int(round(d["cy"]))
-        x0 = max(0, cx - side // 2); x1 = min(W, x0 + side)
-        y0 = max(0, cy - side // 2); y1 = min(H, y0 + side)
-        crop = frame[y0:y1, x0:x1, :3]
-        # Pad to (side, side) if we hit a border.
-        if crop.shape[0] != side or crop.shape[1] != side:
-            full = np.zeros((side, side, 3), dtype=np.uint8)
-            full[:crop.shape[0], :crop.shape[1]] = crop
-            crop = full
-        # Label strip on top.
-        strip = np.zeros((label_strip_h, side, 3), dtype=np.uint8)
-        cv2.putText(strip, d["label"], (4, 13), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.42, (255, 255, 255), 1, cv2.LINE_AA)
-        panel = np.vstack([strip, crop])
-        panels.append(panel)
+        canvas = frame[..., :3].astype(np.float32)
 
-    if not panels:
-        raise HTTPException(status_code=404, detail="no panels rendered")
+        # Tint each accepted track's instance in this frame; remember the
+        # (cx, cy, track_id, hue, r) of each so we can burn labels after.
+        label_jobs: list[tuple[int, int, int, np.ndarray, int]] = []
+        mask_path = _CELLPOSE_CACHE_ROOT / safe / f"{tp.label}.mask.png"
+        if mask_path.is_file() and i in per_frame_tracks:
+            masks = cv2.imread(str(mask_path), cv2.IMREAD_UNCHANGED)
+            if masks is not None and masks.shape == canvas.shape[:2]:
+                for entry in per_frame_tracks[i]:
+                    cx, cy = int(round(entry["cx"])), int(round(entry["cy"]))
+                    if not (0 <= cx < masks.shape[1] and 0 <= cy < masks.shape[0]):
+                        continue
+                    lab = int(masks[cy, cx])
+                    if lab == 0:
+                        continue
+                    inst = masks == lab
+                    if not inst.any():
+                        continue
+                    canvas[inst] = canvas[inst] * (1 - fill_alpha) + entry["hue"] * fill_alpha
+                    bnd = find_boundaries(inst, mode="thick")
+                    canvas[bnd] = entry["hue"]
+                    # Equivalent radius for label sizing.
+                    n_inst = int(inst.sum())
+                    r_eq = int(round((n_inst / 3.14159) ** 0.5))
+                    label_jobs.append((cx, cy, entry["track_id"], entry["hue"], r_eq))
 
-    sep = np.full((panels[0].shape[0], sep_w, 3), 36, dtype=np.uint8)
-    pieces = []
-    for i, p in enumerate(panels):
-        if i > 0:
-            pieces.append(sep)
-        pieces.append(p)
-    big = np.concatenate(pieces, axis=1)
-    # Header strip with track meta.
-    hdr = np.zeros((22, big.shape[1], 3), dtype=np.uint8)
-    text = (f"track {track_id}  ·  n={len(dets)}  ·  "
-            f"crop={side}px (largest r={largest['r']:.0f})")
-    cv2.putText(hdr, text, (6, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.50,
-                (220, 220, 220), 1, cv2.LINE_AA)
-    big = np.vstack([hdr, big])
+        # Timestamp strip on the bottom-right corner.
+        out = np.clip(canvas, 0, 255).astype(np.uint8)
 
-    bgr = cv2.cvtColor(big, cv2.COLOR_RGB2BGR)
-    ok, buf = cv2.imencode(".png", bgr)
-    if not ok:
-        raise HTTPException(status_code=500, detail="png encode failed")
-    return Response(content=buf.tobytes(), media_type="image/png")
+        # Burn ID labels (after the canvas is uint8 so OpenCV likes it).
+        if labels:
+            for cx, cy, tid, hue, r_eq in label_jobs:
+                font_scale = max(0.35, min(1.4, r_eq / 38.0))
+                thickness = 1 if font_scale < 0.6 else 2
+                text = str(tid)
+                size, _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX,
+                                          font_scale, thickness)
+                tx = cx - size[0] // 2
+                ty = cy + size[1] // 2
+                # Black outline first, then coloured fill on top.
+                cv2.putText(out, text, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX,
+                            font_scale, (0, 0, 0), thickness + 2, cv2.LINE_AA)
+                col = (int(hue[0]), int(hue[1]), int(hue[2]))
+                cv2.putText(out, text, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX,
+                            font_scale, col, thickness, cv2.LINE_AA)
+        disp = fmt_label(tp.label)
+        cv2.rectangle(out, (0, out.shape[0] - 18), (140, out.shape[0]),
+                      (0, 0, 0), -1)
+        cv2.putText(out, disp, (4, out.shape[0] - 4),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+
+        # Downscale if requested.
+        if max_width and out.shape[1] > max_width:
+            scale = max_width / out.shape[1]
+            new_h = int(round(out.shape[0] * scale))
+            out = cv2.resize(out, (max_width, new_h), interpolation=cv2.INTER_AREA)
+        frames_out.append(out)
+
+    if not frames_out:
+        raise HTTPException(status_code=404, detail="no frames")
+
+    buf = io.BytesIO()
+    imageio.mimsave(buf, frames_out, format="GIF", duration=1.0 / max(1, fps), loop=0)
+    headers = {
+        "Content-Disposition":
+            f'attachment; filename="{safe}_tracked.gif"'
+    }
+    return Response(content=buf.getvalue(), media_type="image/gif",
+                    headers=headers)
 
 
 @app.get("/api/well-growth")
@@ -645,10 +950,12 @@ def well_growth(mount_id: str, folder_name: str, valid_only: int = 1) -> dict:
     if not path.is_file():
         return {"available": False, "tracks": []}
     data = json.loads(path.read_text())
+    overrides = _load_validation(folder_name)
     tp_minutes = {tp.label: tp.minutes for tp in well.timepoints}
     out: list[dict] = []
     for t in data.get("tracks", []):
-        if valid_only and not t.get("valid"):
+        accepted = overrides.get(t["id"], bool(t.get("valid")))
+        if valid_only and not accepted:
             continue
         dets = t.get("detections", [])
         if not dets:
@@ -891,12 +1198,73 @@ def cellpose_job() -> dict:
         }
 
 
+def _hue_for_track(track_id: int) -> tuple[int, int, int]:
+    """Golden-angle HSL → BGR, matching the SVG colours used in the viewer.
+    Lightness 60%, saturation 85%."""
+    h = (track_id * 137.508) % 360
+    s, l = 0.85, 0.60
+    c = (1 - abs(2 * l - 1)) * s
+    x = c * (1 - abs(((h / 60) % 2) - 1))
+    m = l - c / 2
+    if   h < 60:  r, g, b = c, x, 0
+    elif h < 120: r, g, b = x, c, 0
+    elif h < 180: r, g, b = 0, c, x
+    elif h < 240: r, g, b = 0, x, c
+    elif h < 300: r, g, b = x, 0, c
+    else:         r, g, b = c, 0, x
+    return int((b + m) * 255), int((g + m) * 255), int((r + m) * 255)
+
+
+def _label_to_track(mount, well, t_idx, masks):
+    """Map mask instance label → (track_id, valid) for the given frame, by
+    looking up which track owns each instance based on its centroid."""
+    safe = well.folder_name.replace("/", "_")
+    track_path = _TRACKS_ROOT / f"{safe}.json"
+    if not track_path.is_file():
+        return {}
+    try:
+        data = json.loads(track_path.read_text())
+    except (OSError, ValueError):
+        return {}
+    overrides = _load_validation(well.folder_name)
+    # Pull this frame's detections by t_idx for fast lookup.
+    frame_dets = []  # [(cx, cy, track_id, accepted)]
+    for t in data.get("tracks", []):
+        accepted = overrides.get(t["id"], bool(t.get("valid")))
+        for d in t.get("detections", []):
+            if d.get("t_idx") == t_idx:
+                frame_dets.append((d["cx"], d["cy"], t["id"], accepted))
+                break
+    if not frame_dets:
+        return {}
+    # For each instance label, find its centroid and match to the closest
+    # track-detection centroid (cheap; aligned-canvas coords match).
+    out: dict[int, tuple[int, bool]] = {}
+    labels = np.unique(masks)
+    for lab in labels:
+        if lab == 0:
+            continue
+        ys, xs = np.where(masks == lab)
+        if ys.size == 0:
+            continue
+        cx, cy = float(xs.mean()), float(ys.mean())
+        best = None
+        for fcx, fcy, tid, valid in frame_dets:
+            d = (fcx - cx) ** 2 + (fcy - cy) ** 2
+            if best is None or d < best[0]:
+                best = (d, tid, valid)
+        if best and best[0] < 9.0 ** 2:  # within 9 px
+            out[int(lab)] = (best[1], best[2])
+    return out
+
+
 @app.get("/api/cellpose-edges")
-def cellpose_edges(key: str, aligned: int = 1) -> Response:
+def cellpose_edges(key: str, aligned: int = 1, by_track: int = 1,
+                    fill: int = 1, fill_alpha: int = 70) -> Response:
     """Boundaries of the cached cellpose mask, returned as a transparent
-    PNG. aligned=1 returns the full canvas-sized boundary image;
-    aligned=0 returns the boundary cropped back to the raw frame so it
-    lines up with /api/image (no aligned padding)."""
+    PNG. by_track=1 (default) colours each instance's boundary by its
+    track's hue (matches the SVG colour); by_track=0 falls back to a
+    single colour. aligned=0 crops the result back to the raw frame."""
     mount, rest = _split_key(key)
     parts = rest.split("/", 1)
     if len(parts) != 2:
@@ -920,17 +1288,43 @@ def cellpose_edges(key: str, aligned: int = 1) -> Response:
         raise HTTPException(status_code=500, detail="bad mask png")
     boundary = find_boundaries(masks, mode="thick")
 
+    h, w = masks.shape
+    bgra = np.zeros((h, w, 4), dtype=np.uint8)
+
+    if by_track:
+        lab2tr = _label_to_track(mount, well, t_idx, masks)
+        fill_a = max(0, min(255, int(fill_alpha)))
+        for lab in np.unique(masks):
+            if lab == 0:
+                continue
+            inst = masks == lab
+            inst_boundary = inst & boundary
+            tr = lab2tr.get(int(lab))
+            if tr is None:
+                bcol = (255, 255, 255)  # untracked → white
+            elif not tr[1]:
+                bcol = (138, 138, 138)  # invalid → desaturated grey
+            else:
+                bcol = _hue_for_track(tr[0])
+            if fill:
+                # Semi-transparent interior in the same hue.
+                bgra[inst] = (bcol[0], bcol[1], bcol[2], fill_a)
+            # Boundary on top, fully opaque.
+            bgra[inst_boundary] = (bcol[0], bcol[1], bcol[2], 255)
+    else:
+        if fill:
+            inst_any = masks > 0
+            bgra[inst_any] = [72, 86, 255, max(0, min(255, int(fill_alpha)))]
+        bgra[boundary] = [72, 86, 255, 255]
+
     if not aligned:
         align = _well_alignment(mount, well)
         if align.placements:
             y0, x0 = align.placements[t_idx]
             img = imread(_safe_image_path(key))
-            raw_h, raw_w = (img.shape[0], img.shape[1]) if img.ndim >= 2 else boundary.shape
-            boundary = boundary[y0:y0 + raw_h, x0:x0 + raw_w]
+            raw_h, raw_w = (img.shape[0], img.shape[1]) if img.ndim >= 2 else bgra.shape[:2]
+            bgra = bgra[y0:y0 + raw_h, x0:x0 + raw_w]
 
-    h, w = boundary.shape
-    bgra = np.zeros((h, w, 4), dtype=np.uint8)
-    bgra[boundary] = [72, 86, 255, 255]
     ok, png = cv2.imencode(".png", bgra)
     if not ok:
         raise HTTPException(status_code=500, detail="png encode failed")

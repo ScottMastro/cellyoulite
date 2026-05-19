@@ -24,8 +24,14 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import cv2
 import numpy as np
 from scipy.optimize import linear_sum_assignment
+from skimage.io import imread
+
+from cellyoulite.io.grid import discover_grid
+from cellyoulite.pipeline.align import compute_alignment_cached, paste_onto_canvas
+from cellyoulite.pipeline.track_stitch import render_track_strips
 
 
 _CACHE_ROOT = Path.cwd() / ".cellpose_cache"
@@ -161,20 +167,96 @@ def main() -> None:
         raise SystemExit(f"no cached wells under {_CACHE_ROOT}/"
                           + (f" matching {args.wells}" if args.wells else ""))
 
+    # Build a name → well lookup for stitch generation (needs alignment + paths).
+    spec = discover_grid("data")
+    wells_by_name = {w.folder_name: w for w in spec.wells}
+
     print(f"tracking {len(well_dirs)} well(s)  min_frac={args.min_frac}", flush=True)
     for i, d in enumerate(well_dirs, 1):
+        # The well-folder name on disk may have had '/' → '_' substitution.
+        # All current data has no slashes, so d.name == folder_name.
+        well = wells_by_name.get(d.name)
         result = link_well(d, min_frac=args.min_frac)
         out_path = out_root / f"{d.name}.json"
         out_path.write_text(json.dumps(result, indent=2))
+
+        # Edge-clip pass: if any detection's bounding box (cx ± r) falls
+        # outside the aligned canvas, the strip view shows black-padded
+        # crops — drop these tracks regardless of length.
+        canvas_h, canvas_w = (0, 0)
+        if well is not None:
+            align_for_canvas = compute_alignment_cached(
+                [tp.path for tp in well.timepoints])
+            canvas_h, canvas_w = align_for_canvas.canvas_shape
+        n_edge_clipped = 0
+        if canvas_w and canvas_h:
+            for tr in result["tracks"]:
+                clipped = False
+                for det in tr.get("detections", []):
+                    r = float(det.get("r", 0))
+                    if (det["cx"] - r < 0 or det["cx"] + r > canvas_w
+                            or det["cy"] - r < 0 or det["cy"] + r > canvas_h):
+                        clipped = True
+                        break
+                tr["edge_clipped"] = clipped
+                if clipped and tr["valid"]:
+                    tr["valid"] = False
+                    n_edge_clipped += 1
+            # Rewrite the JSON with edge_clipped flags applied.
+            out_path.write_text(json.dumps(result, indent=2))
+
         n_total = len(result["tracks"])
         n_good = sum(1 for t in result["tracks"] if t["valid"])
         n_bad = n_total - n_good
         n_full = sum(1 for t in result["tracks"]
                       if t["n_detections"] == result["n_frames"])
-        # Per-well progress line — matches the [N/M] format the UI parses.
+
+        n_stitched = 0
+        if well is not None:
+            stitch_dir = out_root / d.name
+            stitch_dir.mkdir(parents=True, exist_ok=True)
+            # Load aligned frames + masks once per well; closures wrap them.
+            align = compute_alignment_cached([tp.path for tp in well.timepoints])
+            frames_by_label: dict[str, np.ndarray] = {}
+            masks_by_label: dict[str, np.ndarray | None] = {}
+            for t_idx, tp in enumerate(well.timepoints):
+                raw = imread(tp.path)
+                if raw.ndim == 2:
+                    raw = np.stack([raw] * 3, axis=-1)
+                if raw.dtype != np.uint8:
+                    raw = np.clip(raw[..., :3], 0, 255).astype(np.uint8)
+                frames_by_label[tp.label] = paste_onto_canvas(
+                    raw[..., :3], align.placements[t_idx], align.canvas_shape, fill=0)
+                mp = d / f"{tp.label}.mask.png"
+                if mp.is_file():
+                    m = cv2.imread(str(mp), cv2.IMREAD_UNCHANGED)
+                    masks_by_label[tp.label] = m
+                else:
+                    masks_by_label[tp.label] = None
+
+            def _load_frame(lbl, _f=frames_by_label): return _f.get(lbl)
+            def _load_mask(lbl, _m=masks_by_label): return _m.get(lbl)
+
+            for tr in result["tracks"]:
+                if not tr["valid"]:
+                    # Skip invalid tracks — not worth the disk space for now.
+                    continue
+                strips = render_track_strips(
+                    track_id=tr["id"],
+                    detections=tr["detections"],
+                    load_frame=_load_frame,
+                    load_mask=_load_mask,
+                )
+                if not strips:
+                    continue
+                (stitch_dir / f"track_{tr['id']}_raw.png").write_bytes(strips["raw"])
+                (stitch_dir / f"track_{tr['id']}_seg.png").write_bytes(strips["seg"])
+                n_stitched += 1
+
         print(f"[{i:3d}/{len(well_dirs):3d}] {d.name:24s}  "
               f"tracks={n_total:3d}  good={n_good:3d}  bad={n_bad:3d}  "
-              f"full={n_full:3d}", flush=True)
+              f"edge={n_edge_clipped:3d}  "
+              f"full={n_full:3d}  stitched={n_stitched:3d}", flush=True)
     print(f"\ndone — wrote tracks for {len(well_dirs)} well(s)", flush=True)
 
 
