@@ -821,6 +821,15 @@ button.ghost:hover { border-color: var(--err); color: var(--err); }
   font: 500 11px var(--mono); padding: 2px 6px;
   border-radius: 4px;
 }
+/* file-input wrapped in a label so it can carry button styling. */
+label.ghost {
+  display: inline-flex; align-items: center;
+  background: transparent; border: 1px solid var(--rule-strong);
+  color: var(--ink-soft); padding: 4px 10px;
+  font-size: 12px; cursor: pointer;
+  border-radius: 4px;
+}
+label.ghost:hover { border-color: var(--accent); color: var(--accent); }
 .boxplot-grid {
   display: grid; gap: 12px;
   grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));

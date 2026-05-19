@@ -982,6 +982,89 @@ def well_growth(mount_id: str, folder_name: str, valid_only: int = 1) -> dict:
             "n_frames": data.get("n_frames", 0)}
 
 
+# ---------------------- dataset bundle ----------------------
+
+@app.get("/api/bundle-export")
+def bundle_export(include_raw: int = 0) -> Response:
+    """Stream a .tar.gz containing the current processed dataset:
+    .align_cache, .cellpose_cache, tracks, annotations. With include_raw=1
+    the raw data/ folder is bundled too (large)."""
+    import io
+    import tarfile
+    import time as _t
+    dirs = [".align_cache", ".cellpose_cache", "tracks", "annotations"]
+    if include_raw:
+        dirs.append("data")
+
+    root = Path.cwd()
+    contents = []
+    for d in dirs:
+        p = root / d
+        if not p.exists():
+            continue
+        n_files = sum(1 for x in p.rglob("*") if x.is_file())
+        n_bytes = sum(x.stat().st_size for x in p.rglob("*") if x.is_file())
+        contents.append({"name": d, "files": n_files, "bytes": n_bytes})
+
+    if not contents:
+        raise HTTPException(status_code=404, detail="nothing to bundle")
+
+    manifest = {
+        "bundle_version": 1,
+        "created_at": _t.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "source_root": str(root.resolve()),
+        "include_raw": bool(include_raw),
+        "contents": contents,
+    }
+
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        man_bytes = json.dumps(manifest, indent=2).encode()
+        info = tarfile.TarInfo("manifest.json")
+        info.size = len(man_bytes); info.mtime = int(_t.time())
+        tar.addfile(info, io.BytesIO(man_bytes))
+        for c in contents:
+            tar.add(root / c["name"], arcname=c["name"])
+    buf.seek(0)
+    stamp = _t.strftime("%Y%m%d-%H%M%S")
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/gzip",
+        headers={"Content-Disposition":
+                  f'attachment; filename="cellyoulite_{stamp}.tar.gz"'},
+    )
+
+
+@app.post("/api/bundle-import")
+async def bundle_import(request: Request) -> dict:
+    """Restore a .tar.gz bundle into the working directory. Expects the
+    raw bundle bytes as the request body (Content-Type: application/gzip)."""
+    import io
+    import tarfile
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="empty body")
+    try:
+        with tarfile.open(fileobj=io.BytesIO(body), mode="r:gz") as tar:
+            try:
+                m = tar.getmember("manifest.json")
+                manifest = json.loads(tar.extractfile(m).read())
+            except KeyError:
+                raise HTTPException(status_code=400,
+                                     detail="not a cellyoulite bundle (no manifest.json)")
+            root = Path.cwd()
+            for member in tar.getmembers():
+                target = (root / member.name).resolve()
+                if root.resolve() not in target.parents and target != root.resolve():
+                    continue  # refuse paths that escape the project root
+            tar.extractall(root, filter="data")
+    except tarfile.TarError as e:
+        raise HTTPException(status_code=400, detail=f"bad tar: {e}")
+    # Reset in-memory caches so the just-restored disk state is picked up.
+    _align_cache.clear()
+    return {"ok": True, "manifest": manifest}
+
+
 # ---------------------- alignment run / cancel ----------------------
 
 _align_job: dict = {

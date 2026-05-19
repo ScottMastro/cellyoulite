@@ -36,6 +36,11 @@
       <span id="data-path" class="mono small">—</span>
       <button id="refresh" class="ghost">Refresh</button>
       <button id="reveal" class="ghost">Open in Files</button>
+      <button id="bundle-export" class="ghost" title="package processed results as .tar.gz">Export bundle</button>
+      <label class="ghost" id="bundle-import-label" title="restore a bundle">
+        Import bundle<input type="file" id="bundle-import" accept=".gz,.tgz,.tar.gz" hidden>
+      </label>
+      <span id="bundle-status" class="hint"></span>
     </div>
     <p class="hint">Each experiment is a subfolder named <code>&lt;treatment&gt; r&lt;replicate&gt;</code>. Add or edit folders, then hit Refresh.</p>
     <div class="pills" id="grid-pills" hidden></div>
@@ -522,6 +527,48 @@
   };
 
   $("refresh").onclick = () => refreshAll();
+
+  $("bundle-export").onclick = async () => {
+    const btn = $("bundle-export"), st = $("bundle-status");
+    btn.disabled = true; st.textContent = "packaging…";
+    try {
+      const r = await fetch("/api/bundle-export");
+      if (!r.ok) { st.textContent = `error: ${r.statusText}`; return; }
+      const blob = await r.blob();
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `cellyoulite_${new Date().toISOString().slice(0,19).replace(/[-:T]/g,'')}.tar.gz`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 60000);
+      st.textContent = `downloaded ${Math.round(blob.size/1024/1024)} MB`;
+    } catch (e) { st.textContent = `error: ${e}`; }
+    finally { btn.disabled = false; }
+  };
+
+  $("bundle-import").onchange = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const st = $("bundle-status");
+    if (!confirm(`Restore "${file.name}" into the current working directory? Existing files in .align_cache, .cellpose_cache, tracks, and annotations will be overwritten.`)) {
+      e.target.value = ""; return;
+    }
+    st.textContent = "uploading…";
+    try {
+      const r = await fetch("/api/bundle-import", {
+        method: "POST",
+        headers: { "Content-Type": "application/gzip" },
+        body: file,
+      });
+      if (!r.ok) { st.textContent = `error: ${r.statusText}`; return; }
+      const data = await r.json();
+      const counts = (data.manifest?.contents || []).map(c => `${c.name}: ${c.files} files`).join(" · ");
+      st.textContent = `restored — ${counts}`;
+      // Refresh everything to pick up the just-extracted state.
+      await refreshAll();
+    } catch (e) { st.textContent = `error: ${e}`; }
+    finally { e.target.value = ""; }
+  };
+
   $("reveal").onclick = async () => {
     try {
       const r = await fetch("/api/reveal", { method: "POST" });
