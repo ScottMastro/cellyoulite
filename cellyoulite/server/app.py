@@ -172,6 +172,56 @@ def reveal() -> dict:
     return {"ok": True, "path": str(p)}
 
 
+# ---------------------- user accounts ----------------------
+# Password-less profiles. The deployment sits behind an upstream HTTP
+# basic-auth gate; once past that, a user just picks (or creates) a
+# username — there are no per-account credentials. Stored as a flat JSON
+# list under cwd, alongside tracks/ and out/.
+
+_USERS_PATH = Path.cwd() / "users.json"
+
+
+def _load_users() -> list[str]:
+    try:
+        data = json.loads(_USERS_PATH.read_text())
+    except (OSError, ValueError):
+        return []
+    raw = data.get("users", []) if isinstance(data, dict) else data
+    out: list[str] = []
+    seen: set[str] = set()
+    for u in raw if isinstance(raw, list) else []:
+        if isinstance(u, str) and u.strip() and u.strip().lower() not in seen:
+            out.append(u.strip())
+            seen.add(u.strip().lower())
+    return out
+
+
+def _save_users(users: list[str]) -> None:
+    _USERS_PATH.write_text(json.dumps({"users": users}, indent=2))
+
+
+@app.get("/api/users")
+def list_users() -> dict:
+    return {"users": _load_users()}
+
+
+@app.post("/api/users")
+def create_user(body: dict = Body(...)) -> dict:
+    name = (body.get("username") or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="username required")
+    if len(name) > 40:
+        raise HTTPException(status_code=400, detail="username too long (max 40)")
+    users = _load_users()
+    for u in users:                       # case-insensitive de-dup
+        if u.lower() == name.lower():
+            return {"ok": True, "username": u, "users": users, "created": False}
+    users.append(name)
+    users.sort(key=str.lower)
+    _save_users(users)
+    return {"ok": True, "username": name, "users": users, "created": True}
+
+
 @app.get("/api/grid")
 def grid() -> dict:
     """Walk every mount; return wells from all of them, merged."""

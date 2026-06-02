@@ -29,5 +29,8 @@ build/
 # Experiment output (annotated stills, HTML reports, etc.)
 /out/
 
+# Password-less user-account registry (runtime state, created on first use)
+/users.json
+
 # Editor / agent state
 /.claude/
