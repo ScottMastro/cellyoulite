@@ -266,7 +266,7 @@ footer a { color: var(--accent); text-decoration: none; }
 .muted-inline { color: var(--muted); font-weight: 400; font-size: .9em; }
 
 /* Two-column workspace: experiment chooser (scrolls) + fixed-size viewer. */
-.workspace { display: flex; gap: 1.25rem; align-items: stretch; flex-wrap: wrap; }
+.workspace { display: flex; gap: 1.25rem; align-items: flex-start; flex-wrap: wrap; }
 .chooser {
   flex: 1 1 300px;
   min-width: 260px;
@@ -285,8 +285,9 @@ footer a { color: var(--accent); text-decoration: none; }
 
 /* The chooser scrolls within a bounded height so the viewer stays put. */
 #thumb-grid {
-  flex: 1 1 auto;
-  min-height: 0;
+  /* JS (syncChooserHeight) pins this to the viewer's height when a well is
+     open; this max-height is the fallback for the standalone browse view. */
+  max-height: 80vh;
   overflow-y: auto;
   background: var(--panel-2);
   border: 1px solid var(--rule);

@@ -1533,11 +1533,14 @@ def _label_to_track(mount, well, t_idx, masks):
 
 @app.get("/api/cellpose-edges")
 def cellpose_edges(key: str, aligned: int = 1, by_track: int = 1,
-                    fill: int = 1, fill_alpha: int = 70) -> Response:
+                    fill: int = 1, fill_alpha: int = 70,
+                    hide_invalid: int = 0) -> Response:
     """Boundaries of the cached cellpose mask, returned as a transparent
     PNG. by_track=1 (default) colours each instance's boundary by its
     track's hue (matches the SVG colour); by_track=0 falls back to a
-    single colour. aligned=0 crops the result back to the raw frame."""
+    single colour. aligned=0 crops the result back to the raw frame.
+    hide_invalid=1 skips drawing the segmentation of deactivated (rejected)
+    tracks entirely, so hiding deactivated organoids hides their masks too."""
     mount, rest = _split_key(key)
     parts = rest.split("/", 1)
     if len(parts) != 2:
@@ -1576,6 +1579,8 @@ def cellpose_edges(key: str, aligned: int = 1, by_track: int = 1,
             if tr is None:
                 bcol = (255, 255, 255)  # untracked → white
             elif not tr[1]:
+                if hide_invalid:
+                    continue            # deactivated → don't draw its segmentation
                 bcol = (138, 138, 138)  # invalid → desaturated grey
             else:
                 bcol = _hue_for_track(tr[0])
