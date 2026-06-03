@@ -15,9 +15,14 @@ const VIEWER_PX = 1100;
 // Kick off background loads of every frame at the viewer size so the first
 // playback is smooth (warms both the browser cache and the server disk cache).
 function prewarmFrames(well, aligned) {
+  // Prime the browser cache with both the base JPEG and the edges overlay PNG
+  // for every frame, so playback swaps from cache instead of waiting on a
+  // per-frame server render (the overlay lag). The server disk-caches the
+  // edges PNG too, so this is cheap after the first pass.
+  const hideInvalid = $("toggle-deactivated").checked ? 0 : 1;
   for (const tp of well.timepoints) {
-    const im = new Image();
-    im.src = imgUrl(tp.key, VIEWER_PX, aligned);
+    new Image().src = imgUrl(tp.key, VIEWER_PX, aligned);
+    new Image().src = edgesUrl(tp.key, aligned, hideInvalid);
   }
 }
 
@@ -129,12 +134,22 @@ async function showFrame(i) {
   // the server-rendered edges PNG (not just the SVG circle/label).
   const hideInvalid = $("toggle-deactivated").checked ? 0 : 1;
   const nextEdges = edgesUrl(tp.key, a, hideInvalid);
+  // Preload the base JPEG and the edges overlay together and swap only once
+  // BOTH are ready, so the overlay never lands a frame behind the image. Both
+  // are browser- and server-disk-cached (prewarmed on open), so during playback
+  // this is near-instant.
   const pre = new Image();
-  pre.onload = () => {
+  const preE = new Image();
+  let ready = 0;
+  const swap = () => {
+    if (++ready < 2) return;
     $("viewer-img").src = nextSrc;
     $("layer-edges-img").src = nextEdges;
   };
+  pre.onload = pre.onerror = swap;
+  preE.onload = preE.onerror = swap;
   pre.src = nextSrc;
+  preE.src = nextEdges;
 
   // Cellpose circles for this frame (single source of truth for the
   // overlay). Empty if the frame isn't segmented yet.
@@ -320,6 +335,9 @@ function renderAllTracks() {
       star.classList.toggle("on", next);
       const tk = state.tracks && state.tracks.tracks.find(x => x.id === id);
       if (tk) tk.starred = next;
+      // Reflect the ★ in the playback overlay immediately (not just on the next
+      // frame change).
+      if (state.well) showFrame(state.tIdx);
       try {
         await fetch(`/api/track-star?${qs}&track_id=${id}`, {
           method: "POST",
@@ -329,6 +347,7 @@ function renderAllTracks() {
       } catch (err) {
         star.classList.toggle("on", !next);   // revert on failure
         if (tk) tk.starred = !next;
+        if (state.well) showFrame(state.tIdx);
       }
     };
     row.querySelector(".atr-img").onclick = () => showTrackStitch(id);
