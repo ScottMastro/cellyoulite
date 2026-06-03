@@ -9,7 +9,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from fastapi import Body, FastAPI, HTTPException
+from fastapi import Body, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -18,7 +18,9 @@ from skimage.segmentation import find_boundaries
 from starlette.requests import Request
 
 from cellyoulite.__version__ import __version__
-from cellyoulite.io.grid import discover_grid
+from cellyoulite.io.grid import (
+    discover_grid, is_experiment_folder, is_image_name,
+)
 from cellyoulite.pipeline.align import (
     WellAlignment, compute_alignment_cached, is_alignment_cached, paste_onto_canvas,
 )
@@ -1107,16 +1109,104 @@ async def bundle_import(request: Request) -> dict:
                 raise HTTPException(status_code=400,
                                      detail="not a cellyoulite bundle (no manifest.json)")
             root = Path.cwd()
+            updated: set[str] = set()
             for member in tar.getmembers():
                 target = (root / member.name).resolve()
                 if root.resolve() not in target.parents and target != root.resolve():
                     continue  # refuse paths that escape the project root
+                # Figure out which experiments this bundle touches, by name:
+                # result files are keyed by the "<treatment> r<rep>" folder
+                # (as a dir segment, or a "<folder>[ __validation].json" stem).
+                for seg in Path(member.name).parts:
+                    stem = seg[:-5] if seg.endswith(".json") else seg
+                    stem = stem.split("__", 1)[0]
+                    if is_experiment_folder(stem):
+                        updated.add(stem)
             tar.extractall(root, filter="data")
     except tarfile.TarError as e:
         raise HTTPException(status_code=400, detail=f"bad tar: {e}")
     # Reset in-memory caches so the just-restored disk state is picked up.
     _align_cache.clear()
-    return {"ok": True, "manifest": manifest}
+    return {"ok": True, "manifest": manifest,
+            "updated_experiments": sorted(updated)}
+
+
+@app.post("/api/upload-images")
+async def upload_images(files: list[UploadFile] = File(...)) -> dict:
+    """Add raw images. Files arrive from a folder picker, each carrying a
+    relative path; the experiment folder ("<treatment> r<rep>") is detected
+    from that path by name, and the image is dropped into data/<folder>/.
+    Non-images and anything without a recognisable experiment folder are
+    skipped — so the caller can hand us a whole tree and we figure it out."""
+    data_root = _data_dir()
+    data_root.mkdir(parents=True, exist_ok=True)
+    droot = data_root.resolve()
+    added: dict[str, int] = {}
+    skipped = 0
+    for up in files:
+        rel = (up.filename or "").replace("\\", "/")
+        parts = [p for p in rel.split("/") if p not in ("", ".", "..")]
+        if not parts or not is_image_name(parts[-1]):
+            skipped += 1
+            continue
+        exp = next((seg for seg in parts[:-1] if is_experiment_folder(seg)), None)
+        if exp is None:
+            skipped += 1
+            continue
+        dest_dir = (data_root / exp).resolve()
+        if droot not in dest_dir.parents and dest_dir != droot:
+            skipped += 1
+            continue
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        (dest_dir / parts[-1]).write_bytes(await up.read())
+        added[exp] = added.get(exp, 0) + 1
+    return {"ok": True, "experiments": dict(sorted(added.items())),
+            "n_files": sum(added.values()), "n_experiments": len(added),
+            "skipped": skipped}
+
+
+@app.get("/api/download-images")
+def download_images(exp: list[str] = Query(default=[])) -> Response:
+    """Stream a .tar.gz of raw images for the chosen experiments (all if
+    none are specified). Arcnames are data/<folder>/... so the archive can
+    be re-imported as-is."""
+    import io
+    import tarfile
+    import time as _t
+    data_root = _data_dir()
+    if not data_root.is_dir():
+        raise HTTPException(status_code=404, detail="no data folder")
+    available = sorted(
+        p.name for p in data_root.iterdir()
+        if p.is_dir() and is_experiment_folder(p.name)
+    )
+    chosen = [e for e in exp if e in available] if exp else available
+    if not chosen:
+        raise HTTPException(status_code=404, detail="no matching experiments")
+
+    manifest = {
+        "bundle_version": 1,
+        "kind": "images",
+        "created_at": _t.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "experiments": chosen,
+    }
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        man_bytes = json.dumps(manifest, indent=2).encode()
+        info = tarfile.TarInfo("manifest.json")
+        info.size = len(man_bytes); info.mtime = int(_t.time())
+        tar.addfile(info, io.BytesIO(man_bytes))
+        for e in chosen:
+            tar.add(data_root / e, arcname=f"data/{e}")
+    buf.seek(0)
+    stamp = _t.strftime("%Y%m%d-%H%M%S")
+    tag = "all" if len(chosen) == len(available) else f"{len(chosen)}exp"
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/gzip",
+        headers={"Content-Disposition":
+                  f'attachment; filename="cellyoulite_images_{tag}_{stamp}.tar.gz"'},
+    )
 
 
 # ---------------------- alignment run / cancel ----------------------

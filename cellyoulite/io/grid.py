@@ -17,6 +17,16 @@ def _normalize_treatment(name: str) -> str:
     return re.sub(r"\s*\+\s*", "+", " ".join(name.split())).strip()
 
 
+def is_experiment_folder(name: str) -> bool:
+    """True if `name` looks like an experiment folder ("<treatment> r<rep>")."""
+    return bool(_FOLDER_RE.match(name.strip()))
+
+
+def is_image_name(name: str) -> bool:
+    """True if `name` has a recognised image extension."""
+    return Path(name).suffix.lower() in _IMAGE_EXTS
+
+
 @dataclass(frozen=True)
 class Timepoint:
     minutes: int          # total minutes since start of series
