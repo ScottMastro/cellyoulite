@@ -39,9 +39,6 @@ export async function openWell(mountId, folderName) {
   scrub.min = 0; scrub.max = data.timepoints.length - 1; scrub.value = 0;
   scrub.oninput = () => showFrame(parseInt(scrub.value));
 
-  if (alignFlag()) {
-    $("viewer-stat").textContent = "computing alignment…";
-  }
   try {
     const ar = await fetch(`/api/well-align?${qs}`);
     if (ar.ok) state.wellAlignCache = await ar.json();
@@ -128,7 +125,6 @@ async function showFrame(i) {
     $("layer-edges-img").src = nextEdges;
   };
   pre.src = nextSrc;
-  $("viewer-stat").textContent = "loading…";
 
   // Cellpose circles for this frame (single source of truth for the
   // overlay). Empty if the frame isn't segmented yet.
@@ -139,19 +135,13 @@ async function showFrame(i) {
     if (r2.ok && d2.cached) {
       $("viewer-svg").setAttribute("viewBox", `0 0 ${d2.width} ${d2.height}`);
       $("layer-cellpose").innerHTML = renderTrackedCircles(d2.circles, i, a);
-      const goodTotal = state.tracks
-        ? state.tracks.tracks.filter(t => t.valid).length : null;
-      $("viewer-stat").innerHTML = goodTotal != null
-        ? `<strong>${d2.circles.length}</strong> detected · <strong>${goodTotal}</strong> tracked`
-        : `<strong>${d2.circles.length}</strong> organoids detected`;
     } else {
       $("layer-cellpose").innerHTML = "";
-      $("viewer-stat").innerHTML = "not yet segmented";
     }
     applyToggles();
   } catch (e) {
     $("layer-cellpose").innerHTML = "";
-    $("viewer-stat").textContent = String(e.message || e);
+    setStatus("err", String(e.message || e));
   }
 }
 
@@ -188,12 +178,12 @@ function renderTrackedCircles(circles, t_idx, alignedFlag) {
       ? state.wellAlignCache.placements[t_idx] : null);
   // Text label size scales with the circle so it stays readable on tiny
   // organoids without overpowering big ones. Capped at a sensible max.
-  const labelFor = (cx, cy, r, txt, color) => {
+  const labelFor = (cx, cy, r, txt, color, extra = "") => {
     const fs = Math.min(28, Math.max(10, r * 0.55));
     return `<text x="${cx}" y="${cy}" text-anchor="middle" `
          + `dominant-baseline="central" `
          + `font-size="${fs.toFixed(1)}" `
-         + `class="circ-label" fill="${color}">${txt}</text>`;
+         + `class="circ-label ${extra}" fill="${color}">${txt}</text>`;
   };
   const circHtml = [];
   const labelHtml = [];
@@ -218,7 +208,7 @@ function renderTrackedCircles(circles, t_idx, alignedFlag) {
     if (!accepted) {
       circHtml.push(`<circle cx="${c.cx}" cy="${c.cy}" r="${c.r}" `
                   + `data-track-id="${td.track_id}" class="circ-invalid" />`);
-      labelHtml.push(labelFor(c.cx, c.cy, c.r, td.track_id, "#bbbbbb"));
+      labelHtml.push(labelFor(c.cx, c.cy, c.r, td.track_id, "#bbbbbb", "circ-label-invalid"));
       continue;
     }
     const hue = (td.track_id * 137.508) % 360;
@@ -418,6 +408,9 @@ const applyToggles = () => {
   $("layer-edges-img").style.display = $("toggle-edges").checked ? "" : "none";
   $("layer-cellpose").style.display = $("toggle-cellpose").checked ? "" : "none";
   $("layer-cellpose-labels").style.display = $("toggle-ids").checked ? "" : "none";
+  // Hide rejected/deactivated organoids (circles + labels) unless asked for.
+  const stack = document.querySelector(".image-stack");
+  if (stack) stack.classList.toggle("hide-deact", !$("toggle-deactivated").checked);
 };
 
 export function initWell() {
@@ -516,10 +509,10 @@ export function initWell() {
   $("toggle-edges").onchange = applyToggles;
   $("toggle-cellpose").onchange = applyToggles;
   $("toggle-ids").onchange = applyToggles;
+  $("toggle-deactivated").onchange = applyToggles;
   $("toggle-align").onchange = async () => {
     if (!state.well) return;
     if (alignFlag()) {
-      $("viewer-stat").textContent = "computing alignment…";
       const qs = `mount_id=${encodeURIComponent(state.well.mount_id)}&folder_name=${encodeURIComponent(state.well.folder_name)}`;
       try { await fetch(`/api/well-align?${qs}`); } catch (e) {}
     }

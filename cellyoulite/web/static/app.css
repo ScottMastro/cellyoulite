@@ -199,14 +199,6 @@ button:disabled:hover { border-color: var(--rule-strong); color: var(--ink); fil
 
 /* Viewer stat pill: fixed width so transitions between "loading…" and
    "N organoids detected" don't push neighbouring toolbar items around. */
-#viewer-stat {
-  display: inline-flex; align-items: center; justify-content: center;
-  min-width: 200px;
-  padding: 6px 16px;
-  font-variant-numeric: tabular-nums;
-  text-align: center;
-}
-#viewer-stat strong { margin-right: 4px; }
 
 /* ---------- log / output ---------- */
 
@@ -274,7 +266,7 @@ footer a { color: var(--accent); text-decoration: none; }
 .muted-inline { color: var(--muted); font-weight: 400; font-size: .9em; }
 
 /* Two-column workspace: experiment chooser (scrolls) + fixed-size viewer. */
-.workspace { display: flex; gap: 1.25rem; align-items: flex-start; flex-wrap: wrap; }
+.workspace { display: flex; gap: 1.25rem; align-items: stretch; flex-wrap: wrap; }
 .chooser {
   flex: 1 1 300px;
   min-width: 260px;
@@ -293,7 +285,8 @@ footer a { color: var(--accent); text-decoration: none; }
 
 /* The chooser scrolls within a bounded height so the viewer stays put. */
 #thumb-grid {
-  max-height: 78vh;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
   background: var(--panel-2);
   border: 1px solid var(--rule);
@@ -508,7 +501,6 @@ button.redo:hover {
 /* ---------- viewer ---------- */
 
 .viewer {
-  margin-top: 1.25rem;
   border: 1px solid var(--rule);
   background: var(--panel-2);
   border-radius: 8px;
@@ -540,6 +532,10 @@ button.redo:hover {
   padding: 0 3px; line-height: 12px; text-align: center;
 }
 .swatch-align   { background: repeating-linear-gradient(45deg, #1f9e89 0 3px, transparent 3px 6px); border: 1px solid #1f9e89; }
+.swatch-invalid { background: #8a8a8a; border: 1px solid #c0c0c0; border-radius: 50%; }
+/* "deactivated" toggle off (default): hide rejected organoids + their labels. */
+.image-stack.hide-deact .circ-invalid,
+.image-stack.hide-deact .circ-label-invalid { display: none; }
 button.ghost {
   background: transparent; border-color: var(--rule-strong); color: var(--ink-soft);
   padding: 4px 10px; font-size: 12px;
@@ -672,20 +668,21 @@ button.ghost:hover { border-color: var(--err); color: var(--err); }
 .filmstrip {
   --hole: 8px;
   --gap: 14px;
-  display: flex; gap: 6px;
+  display: flex; gap: 6px; align-items: center;
   overflow-x: auto; overflow-y: hidden;
   padding: calc(var(--hole) + 6px) 12px;
   background:
     /* top row of sprocket holes */
-    radial-gradient(circle at center, #0d1015 var(--hole), transparent calc(var(--hole) + 0.5px))
+    radial-gradient(circle at center, #14171c var(--hole), transparent calc(var(--hole) + 0.5px))
       0 4px / calc(var(--hole) * 2 + var(--gap)) calc(var(--hole) * 2 + 2px) repeat-x,
     /* bottom row */
-    radial-gradient(circle at center, #0d1015 var(--hole), transparent calc(var(--hole) + 0.5px))
+    radial-gradient(circle at center, #14171c var(--hole), transparent calc(var(--hole) + 0.5px))
       0 100% / calc(var(--hole) * 2 + var(--gap)) calc(var(--hole) * 2 + 2px) repeat-x,
-    #1a1d23;
+    #424954;
   scroll-behavior: smooth;
-  scrollbar-color: var(--rule-strong) transparent;
+  scrollbar-width: none;            /* Firefox — hide the scrollbar */
 }
+.filmstrip::-webkit-scrollbar { display: none; }   /* WebKit — hide the scrollbar */
 .filmstrip .frame {
   position: relative;
   flex: 0 0 84px;
