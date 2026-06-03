@@ -138,19 +138,22 @@ def compute_alignment(paths: list[Path]) -> WellAlignment:
 
 
 _CACHE_DIR = Path.cwd() / ".align_cache"
-_CACHE_VERSION = 2  # bump to invalidate when the algorithm changes
+_CACHE_VERSION = 3  # bump to invalidate when the algorithm changes
 
 
 def _fingerprint(paths: list[Path]) -> str:
-    """Stable hash of (path, mtime_ns, size) for every input file. The path
-    is canonicalised to its absolute form so callers passing the same files
-    via relative vs absolute Path produce the same cache entry."""
+    """Stable hash of (relative-id, mtime_ns, size) for every input file.
+
+    Identity is the well-relative path ("<well folder>/<filename>"), NOT the
+    absolute path — so a cache computed on one machine (or in the offshored
+    analysis tool) matches when the same files live elsewhere (e.g. the
+    server), as long as mtime+size survive the transfer (tar/rsync -a do)."""
     h = hashlib.sha1()
     h.update(f"v{_CACHE_VERSION}\n".encode())
     for p in paths:
         st = p.stat()
-        canonical = str(p.resolve())
-        h.update(f"{canonical}\n{st.st_mtime_ns}\n{st.st_size}\n".encode())
+        rel = f"{p.parent.name}/{p.name}"
+        h.update(f"{rel}\n{st.st_mtime_ns}\n{st.st_size}\n".encode())
     return h.hexdigest()[:16]
 
 
