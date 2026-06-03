@@ -32,6 +32,20 @@ app = FastAPI(title="CellxYou Lite", version=__version__)
 app.mount("/static", StaticFiles(directory=str(_WEB / "static")), name="static")
 
 
+@app.middleware("http")
+async def _revalidate_static(request: Request, call_next):
+    """Make browsers revalidate static assets (JS modules, CSS) on every load.
+    The ES-module entry carries ?v=<version>, but that query doesn't propagate
+    to its relative imports — so without this a deploy could serve a fresh
+    main.js against stale cached feature modules. `no-cache` keeps responses
+    cacheable but forces an If-None-Match/304 check, so it's cheap and correct.
+    """
+    resp = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
 # ---------------------- data folder ----------------------
 # Single rooted folder: `$CELLYOULITE_DATA` or `./data` (relative to cwd).
 # Internal "mount" abstraction is kept (so keys stay <mount_id>/<rest>) but
