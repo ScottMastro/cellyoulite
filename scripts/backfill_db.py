@@ -94,16 +94,22 @@ def main() -> None:
                 src_fp = (_fingerprint(meta[p.stem][2])
                           if p.stem in meta and meta[p.stem][2] else None)
                 for t in data.get("tracks", []):
+                    dets = t.get("detections", [])
+                    first = min(dets, key=lambda d: d["t_idx"]) if dets else None
+                    anchor_cx = first["cx"] if first else None
+                    anchor_cy = first["cy"] if first else None
                     conn.execute(
                         "INSERT INTO track(well_id,track_num,n_detections,first_t,last_t,"
-                        "auto_valid,edge_clipped,source_fingerprint) VALUES(?,?,?,?,?,?,?,?) "
+                        "auto_valid,edge_clipped,source_fingerprint,anchor_cx,anchor_cy) "
+                        "VALUES(?,?,?,?,?,?,?,?,?,?) "
                         "ON CONFLICT(well_id,track_num) DO UPDATE SET "
                         "n_detections=excluded.n_detections,first_t=excluded.first_t,"
                         "last_t=excluded.last_t,auto_valid=excluded.auto_valid,"
-                        "edge_clipped=excluded.edge_clipped,source_fingerprint=excluded.source_fingerprint",
+                        "edge_clipped=excluded.edge_clipped,source_fingerprint=excluded.source_fingerprint,"
+                        "anchor_cx=excluded.anchor_cx,anchor_cy=excluded.anchor_cy",
                         (wid, t["id"], t.get("n_detections", 0), t.get("first_t", 0),
                          t.get("last_t", 0), int(bool(t.get("valid"))),
-                         int(bool(t.get("edge_clipped"))), src_fp))
+                         int(bool(t.get("edge_clipped"))), src_fp, anchor_cx, anchor_cy))
                     tid = conn.execute("SELECT id FROM track WHERE well_id=? AND track_num=?",
                                        (wid, t["id"])).fetchone()["id"]
                     conn.execute("DELETE FROM detection WHERE track_id=?", (tid,))

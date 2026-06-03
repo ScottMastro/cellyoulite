@@ -57,16 +57,24 @@ def set_tracks(folder_name: str, tracks_data: dict, source_fingerprint=None,
         wid = ensure_well(conn, folder_name, treatment, replicate)
         n = 0
         for t in tracks_data.get("tracks", []):
+            # Fixed-id anchor = the organoid's first-frame centroid.
+            dets = t.get("detections", [])
+            first = min(dets, key=lambda d: d["t_idx"]) if dets else None
+            anchor_cx = first["cx"] if first else None
+            anchor_cy = first["cy"] if first else None
             conn.execute(
                 "INSERT INTO track(well_id,track_num,n_detections,first_t,last_t,"
-                "auto_valid,edge_clipped,source_fingerprint) VALUES(?,?,?,?,?,?,?,?) "
+                "auto_valid,edge_clipped,source_fingerprint,anchor_cx,anchor_cy) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?) "
                 "ON CONFLICT(well_id,track_num) DO UPDATE SET "
                 "n_detections=excluded.n_detections,first_t=excluded.first_t,"
                 "last_t=excluded.last_t,auto_valid=excluded.auto_valid,"
-                "edge_clipped=excluded.edge_clipped,source_fingerprint=excluded.source_fingerprint",
+                "edge_clipped=excluded.edge_clipped,source_fingerprint=excluded.source_fingerprint,"
+                "anchor_cx=excluded.anchor_cx,anchor_cy=excluded.anchor_cy",
                 (wid, t["id"], t.get("n_detections", 0), t.get("first_t", 0),
                  t.get("last_t", 0), int(bool(t.get("valid"))),
-                 int(bool(t.get("edge_clipped"))), source_fingerprint))
+                 int(bool(t.get("edge_clipped"))), source_fingerprint,
+                 anchor_cx, anchor_cy))
             tid = conn.execute("SELECT id FROM track WHERE well_id=? AND track_num=?",
                                (wid, t["id"])).fetchone()["id"]
             conn.execute("DELETE FROM detection WHERE track_id=?", (tid,))
@@ -105,7 +113,8 @@ def get_tracks(folder_name: str) -> dict | None:
         if not w:
             return None
         trows = conn.execute(
-            "SELECT id,track_num,n_detections,first_t,last_t,auto_valid,edge_clipped,starred "
+            "SELECT id,track_num,n_detections,first_t,last_t,auto_valid,edge_clipped,"
+            "starred,anchor_cx,anchor_cy "
             "FROM track WHERE well_id=? ORDER BY track_num", (w["id"],)).fetchall()
         if not trows:
             return None
@@ -121,6 +130,7 @@ def get_tracks(folder_name: str) -> dict | None:
                 "first_t": tr["first_t"], "last_t": tr["last_t"],
                 "valid": bool(tr["auto_valid"]), "edge_clipped": bool(tr["edge_clipped"]),
                 "starred": bool(tr["starred"]),
+                "anchor_cx": tr["anchor_cx"], "anchor_cy": tr["anchor_cy"],
                 "detections": [dict(d) for d in dets],
             })
         return {"n_frames": n_frames, "tracks": tracks}
