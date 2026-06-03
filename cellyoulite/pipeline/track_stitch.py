@@ -4,7 +4,8 @@ Variants per organoid:
   - "raw"  — cropped raw frames with the timepoint label on top.
   - "seg"  — same crop with the organoid's mask instance tinted in its hue.
   - "diff" — growth/loss of each frame vs the first-frame baseline mask
-             (centroid-aligned): retained grey, new growth blue, loss orange.
+             (centroid-aligned), tinted ON the raw organoid: growth blue,
+             loss orange (so changes can be checked against the real image).
   - "both" — raw + seg + diff stacked (the click-to-inspect view).
 
 Used by both the tracking script (pre-generates and caches per-organoid PNGs
@@ -121,26 +122,31 @@ def _header(width: int, text: str, header_h: int,
     return hdr
 
 
-def _diff_panel(base_bool, cur_bool, side: int) -> np.ndarray:
-    """Per-frame growth/loss vs the first-frame baseline mask (centroid-aligned
-    crops, so this is a pure size/shape change, not movement): retained area
-    grey, new growth blue, loss orange, on black."""
-    panel = np.zeros((side, side, 3), dtype=np.uint8)
-    GROW = (60, 130, 255)   # blue  (rgb)
-    LOSS = (255, 140, 30)   # orange (rgb)
-    KEEP = (150, 150, 150)  # retained
-    if base_bool is None and cur_bool is None:
-        return panel
-    if base_bool is None:
-        panel[cur_bool] = GROW
-        return panel
-    if cur_bool is None:
-        panel[base_bool] = LOSS
-        return panel
-    panel[base_bool & cur_bool] = KEEP
-    panel[cur_bool & ~base_bool] = GROW
-    panel[base_bool & ~cur_bool] = LOSS
-    return panel
+def _diff_overlay(raw_crop: np.ndarray, base_bool, cur_bool) -> np.ndarray:
+    """Per-frame growth/loss vs the first-frame baseline mask (centroid-aligned,
+    so it's a pure size/shape change) overlaid ON the raw organoid crop — so the
+    change can be checked against the actual image, not just the segmentation.
+    New growth is tinted blue, loss orange (retained organoid left as raw); the
+    current mask edge is outlined for context."""
+    out = raw_crop.astype(np.float32)
+    GROW = np.array((60, 130, 255), dtype=np.float32)   # blue
+    LOSS = np.array((255, 140, 30), dtype=np.float32)   # orange
+    alpha = 0.5
+    growth = loss = None
+    if base_bool is not None and cur_bool is not None:
+        growth = cur_bool & ~base_bool
+        loss = base_bool & ~cur_bool
+    elif cur_bool is not None:
+        growth = cur_bool
+    elif base_bool is not None:
+        loss = base_bool
+    if growth is not None and growth.any():
+        out[growth] = out[growth] * (1 - alpha) + GROW * alpha
+    if loss is not None and loss.any():
+        out[loss] = out[loss] * (1 - alpha) + LOSS * alpha
+    if cur_bool is not None and cur_bool.any():
+        out[find_boundaries(cur_bool, mode="thick")] = (235, 235, 235)
+    return np.clip(out, 0, 255).astype(np.uint8)
 
 
 def _seg_overlay(raw_crop: np.ndarray, mask_crop: np.ndarray,
@@ -243,7 +249,8 @@ def render_track_strips(
     Each detection needs: label, cx, cy, r (and area_px when available). The
     header text scales with the crop size and reports the first→last size
     change. The 'diff' strip compares each frame's mask to the first-frame
-    baseline (centroid-aligned): retained grey, new growth blue, loss orange.
+    baseline (centroid-aligned), tinting growth blue / loss orange ON the raw
+    organoid crop so changes can be checked against the real image.
     Returns {'raw','seg','diff','both': png_bytes, 'side': int, 'n': int}."""
     if not detections:
         return {}
@@ -281,7 +288,7 @@ def render_track_strips(
                 seg_crop = _seg_overlay(raw_crop, mask_crop, label_here, tr_rgb)
         if base_bool is None and inst_bool is not None:
             base_bool = inst_bool
-        diff_crop = _diff_panel(base_bool, inst_bool, side)
+        diff_crop = _diff_overlay(raw_crop, base_bool, inst_bool)
         strip = _label_strip(side, fmt_label(d["label"]), strip_h, font_scale, thickness)
         raw_panels.append(np.vstack([strip, raw_crop]))
         seg_panels.append(np.vstack([strip, seg_crop]))
