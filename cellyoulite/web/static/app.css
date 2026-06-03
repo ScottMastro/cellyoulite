@@ -770,6 +770,7 @@ button.ghost:hover { border-color: var(--err); color: var(--err); }
   left: 20px; background: hsl(var(--hue, 200), 85%, 60%);
 }
 .atr-info { display: flex; flex-direction: column; gap: 3px; align-items: flex-start; }
+.atr-id-row { display: flex; align-items: center; gap: 6px; }
 .atr-gif {
   font: 600 10px var(--mono);
   padding: 2px 8px; margin-top: 2px;
@@ -782,7 +783,7 @@ button.ghost:hover { border-color: var(--err); color: var(--err); }
 .atr-star {
   font-size: 13px;
   line-height: 1;
-  padding: 2px 6px; margin-top: 2px;
+  padding: 2px 6px;
   background: #1a1f29; color: var(--muted);
   border: 1px solid var(--rule); border-radius: 4px;
   cursor: pointer;

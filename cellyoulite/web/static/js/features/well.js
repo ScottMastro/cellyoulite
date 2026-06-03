@@ -166,7 +166,8 @@ function detectionsForFrame(t_idx, alignedFlag) {
     for (const d of tr.detections) {
       if (d.t_idx !== t_idx) continue;
       out.push({ cx: d.cx, cy: d.cy, r: d.r,
-                 track_id: tr.id, valid: tr.valid });
+                 track_id: tr.id, valid: tr.valid, starred: tr.starred,
+                 anchor_cx: tr.anchor_cx, anchor_cy: tr.anchor_cy });
       break;
     }
   }
@@ -188,12 +189,24 @@ function renderTrackedCircles(circles, t_idx, alignedFlag) {
       ? state.wellAlignCache.placements[t_idx] : null);
   // Text label size scales with the circle so it stays readable on tiny
   // organoids without overpowering big ones. Capped at a sensible max.
-  const labelFor = (cx, cy, r, txt, color, extra = "") => {
+  // A starred organoid gets a gold ★ prefix on its id.
+  const labelFor = (cx, cy, r, txt, color, extra = "", starred = false) => {
     const fs = Math.min(40, Math.max(14, r * 0.8));
+    const star = starred ? `<tspan fill="#ffd24a">★</tspan>` : "";
     return `<text x="${cx}" y="${cy}" text-anchor="middle" `
          + `dominant-baseline="central" `
          + `font-size="${fs.toFixed(1)}" `
-         + `class="circ-label ${extra}" fill="${color}">${txt}</text>`;
+         + `class="circ-label ${extra}" fill="${color}">${star}${txt}</text>`;
+  };
+  // The id label is pinned to the organoid's fixed anchor (its first-frame
+  // centroid, from the DB) so it stays put instead of jumping with the moving
+  // organoid. Anchors are in aligned coords; in the unaligned view we shift them
+  // by this frame's placement to match the displayed (raw) image.
+  const anchorPos = (td, fx, fy) => {
+    if (td.anchor_cx == null || td.anchor_cy == null) return [fx, fy];
+    return placement
+      ? [td.anchor_cx - placement[1], td.anchor_cy - placement[0]]
+      : [td.anchor_cx, td.anchor_cy];
   };
   const circHtml = [];
   const labelHtml = [];
@@ -211,6 +224,7 @@ function renderTrackedCircles(circles, t_idx, alignedFlag) {
       continue;
     }
     const td = best[0];
+    const [lx, ly] = anchorPos(td, c.cx, c.cy);
     // Acceptance follows the user's manual overrides too, so toggling a
     // validation switch flips the colour live without a refresh.
     const accepted = state.validation.hasOwnProperty(td.track_id)
@@ -218,7 +232,7 @@ function renderTrackedCircles(circles, t_idx, alignedFlag) {
     if (!accepted) {
       circHtml.push(`<circle cx="${c.cx}" cy="${c.cy}" r="${c.r}" `
                   + `data-track-id="${td.track_id}" class="circ-invalid" />`);
-      labelHtml.push(labelFor(c.cx, c.cy, c.r, td.track_id, "#bbbbbb", "circ-label-invalid"));
+      labelHtml.push(labelFor(lx, ly, c.r, td.track_id, "#bbbbbb", "circ-label-invalid", td.starred));
       continue;
     }
     const hue = (td.track_id * 137.508) % 360;
@@ -226,7 +240,7 @@ function renderTrackedCircles(circles, t_idx, alignedFlag) {
     circHtml.push(`<circle cx="${c.cx}" cy="${c.cy}" r="${c.r}" `
                 + `data-track-id="${td.track_id}" `
                 + `stroke="${color}" fill="${color}" />`);
-    labelHtml.push(labelFor(c.cx, c.cy, c.r, td.track_id, color));
+    labelHtml.push(labelFor(lx, ly, c.r, td.track_id, color, "", td.starred));
   }
   // Side-effect: also pop the labels into their dedicated layer so they
   // remain visible when the "circles" toggle is off.
@@ -271,13 +285,15 @@ function renderAllTracks() {
         <span class="atr-switch-knob" style="--hue: ${hue.toFixed(0)}"></span>
       </label>
       <div class="atr-info">
-        <span class="atr-id" style="background: hsl(${hue.toFixed(0)},85%,60%)">#${t.id}</span>
+        <div class="atr-id-row">
+          <span class="atr-id" style="background: hsl(${hue.toFixed(0)},85%,60%)">#${t.id}</span>
+          <button class="atr-star${t.starred ? " on" : ""}" data-track-id="${t.id}" title="mark as exemplar">★</button>
+        </div>
         <span class="atr-meta">n=${t.n_detections}/${state.tracks.n_frames} · t${t.first_t}–t${t.last_t}</span>
-        <button class="atr-star${t.starred ? " on" : ""}" data-track-id="${t.id}" title="mark as exemplar">★</button>
         <button class="atr-gif" data-track-id="${t.id}" title="download GIF">GIF ↓</button>
       </div>
       <img class="atr-img" src="${stitchUrl}" loading="lazy"
-           alt="track ${t.id}" />
+           alt="organoid ${t.id}" />
     </div>`;
   }).join("");
 
@@ -329,7 +345,7 @@ function renderAllTracks() {
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = url;
-        a.download = `${state.well.folder_name.replace(/\s+/g, "_")}_track_${id}_${variant}.gif`;
+        a.download = `${state.well.folder_name.replace(/\s+/g, "_")}_organoid_${id}_${variant}.gif`;
         a.click();
         setTimeout(() => URL.revokeObjectURL(url), 60000);
         btn.textContent = "✓";
@@ -377,17 +393,17 @@ async function showTrackStitch(trackId) {
            + `&track_id=${trackId}`;
   const wrap = $("track-stitch");
   wrap.hidden = false;
-  $("track-stitch-title").textContent = `track ${trackId} · loading…`;
+  $("track-stitch-title").textContent = `organoid ${trackId} · loading…`;
   $("track-stitch-img").removeAttribute("src");
   try {
     const r = await fetch(`/api/track-stitch?${qs}`);
-    if (!r.ok) { $("track-stitch-title").textContent = `track ${trackId} · error`; return; }
+    if (!r.ok) { $("track-stitch-title").textContent = `organoid ${trackId} · error`; return; }
     const blob = await r.blob();
     const url = URL.createObjectURL(blob);
     $("track-stitch-img").src = url;
-    $("track-stitch-title").textContent = `track ${trackId}`;
+    $("track-stitch-title").textContent = `organoid ${trackId}`;
   } catch (e) {
-    $("track-stitch-title").textContent = `track ${trackId} · ${e.message || e}`;
+    $("track-stitch-title").textContent = `organoid ${trackId} · ${e.message || e}`;
   }
 }
 
@@ -505,7 +521,7 @@ export function initWell() {
       statusEl.textContent = `error: ${e}`;
     } finally {
       btn.disabled = false;
-      btn.textContent = "Export GIF (accepted tracks)";
+      btn.textContent = "Export GIF (accepted organoids)";
     }
   };
 
