@@ -3,10 +3,12 @@
 Variants per organoid:
   - "raw"  — cropped raw frames with the timepoint label on top.
   - "seg"  — same crop with the organoid's mask instance tinted in its hue.
-  - "diff" — growth/loss of each frame vs the first-frame baseline mask
-             (centroid-aligned), tinted ON the raw organoid: growth blue,
-             loss orange (so changes can be checked against the real image).
-  - "both" — raw + seg + diff stacked (the click-to-inspect view).
+  - "diff"  — growth/loss of each frame vs the first-frame baseline mask
+              (centroid-aligned), tinted ON the raw organoid: growth blue,
+              loss orange (so changes can be checked against the real image).
+  - "shape" — the same growth/loss as a silhouette on black (retained grey),
+              isolating the shape change.
+  - "both"  — raw + seg + diff + shape stacked (the click-to-inspect view).
 
 Used by both the tracking script (pre-generates and caches per-organoid PNGs
 when a well is processed) and the FastAPI server (falls back to on-demand
@@ -122,31 +124,49 @@ def _header(width: int, text: str, header_h: int,
     return hdr
 
 
+_GROW = (60, 130, 255)   # blue
+_LOSS = (255, 140, 30)   # orange
+_KEEP = (150, 150, 150)  # retained (silhouette panel only)
+
+
+def _diff_masks(base_bool, cur_bool):
+    """(growth, loss) boolean masks vs the baseline; either may be None."""
+    if base_bool is not None and cur_bool is not None:
+        return cur_bool & ~base_bool, base_bool & ~cur_bool
+    if cur_bool is not None:
+        return cur_bool, None
+    if base_bool is not None:
+        return None, base_bool
+    return None, None
+
+
 def _diff_overlay(raw_crop: np.ndarray, base_bool, cur_bool) -> np.ndarray:
     """Per-frame growth/loss vs the first-frame baseline mask (centroid-aligned,
-    so it's a pure size/shape change) overlaid ON the raw organoid crop — so the
+    so it's a pure size/shape change) tinted ON the raw organoid crop — so the
     change can be checked against the actual image, not just the segmentation.
-    New growth is tinted blue, loss orange (retained organoid left as raw); the
-    current mask edge is outlined for context."""
+    New growth is tinted blue, loss orange; retained organoid left as raw."""
     out = raw_crop.astype(np.float32)
-    GROW = np.array((60, 130, 255), dtype=np.float32)   # blue
-    LOSS = np.array((255, 140, 30), dtype=np.float32)   # orange
+    growth, loss = _diff_masks(base_bool, cur_bool)
     alpha = 0.5
-    growth = loss = None
-    if base_bool is not None and cur_bool is not None:
-        growth = cur_bool & ~base_bool
-        loss = base_bool & ~cur_bool
-    elif cur_bool is not None:
-        growth = cur_bool
-    elif base_bool is not None:
-        loss = base_bool
     if growth is not None and growth.any():
-        out[growth] = out[growth] * (1 - alpha) + GROW * alpha
+        out[growth] = out[growth] * (1 - alpha) + np.array(_GROW, np.float32) * alpha
     if loss is not None and loss.any():
-        out[loss] = out[loss] * (1 - alpha) + LOSS * alpha
-    if cur_bool is not None and cur_bool.any():
-        out[find_boundaries(cur_bool, mode="thick")] = (235, 235, 235)
+        out[loss] = out[loss] * (1 - alpha) + np.array(_LOSS, np.float32) * alpha
     return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def _shape_panel(base_bool, cur_bool, side: int) -> np.ndarray:
+    """The growth/loss silhouette on black: retained area grey, new growth blue,
+    loss orange. Complements the on-image overlay by isolating the shape change."""
+    panel = np.zeros((side, side, 3), dtype=np.uint8)
+    growth, loss = _diff_masks(base_bool, cur_bool)
+    if base_bool is not None and cur_bool is not None:
+        panel[base_bool & cur_bool] = _KEEP
+    if growth is not None:
+        panel[growth] = _GROW
+    if loss is not None:
+        panel[loss] = _LOSS
+    return panel
 
 
 def _seg_overlay(raw_crop: np.ndarray, mask_crop: np.ndarray,
@@ -250,8 +270,8 @@ def render_track_strips(
     header text scales with the crop size and reports the first→last size
     change. The 'diff' strip compares each frame's mask to the first-frame
     baseline (centroid-aligned), tinting growth blue / loss orange ON the raw
-    organoid crop so changes can be checked against the real image.
-    Returns {'raw','seg','diff','both': png_bytes, 'side': int, 'n': int}."""
+    organoid crop; 'shape' is the same growth/loss as a silhouette on black.
+    Returns {'raw','seg','diff','shape','both': png_bytes, 'side','n': int}."""
     if not detections:
         return {}
     dets = sorted(detections, key=lambda d: d.get("t_idx", 0))
@@ -264,6 +284,7 @@ def render_track_strips(
     raw_panels: list[np.ndarray] = []
     seg_panels: list[np.ndarray] = []
     diff_panels: list[np.ndarray] = []
+    shape_panels: list[np.ndarray] = []
     base_bool = None   # first-frame mask instance (baseline for the diff)
     for d in dets:
         frame = load_frame(d["label"])
@@ -289,10 +310,12 @@ def render_track_strips(
         if base_bool is None and inst_bool is not None:
             base_bool = inst_bool
         diff_crop = _diff_overlay(raw_crop, base_bool, inst_bool)
+        shape_crop = _shape_panel(base_bool, inst_bool, side)
         strip = _label_strip(side, fmt_label(d["label"]), strip_h, font_scale, thickness)
         raw_panels.append(np.vstack([strip, raw_crop]))
         seg_panels.append(np.vstack([strip, seg_crop]))
         diff_panels.append(np.vstack([strip, diff_crop]))
+        shape_panels.append(np.vstack([strip, shape_crop]))
 
     if not raw_panels:
         return {}
@@ -300,6 +323,7 @@ def render_track_strips(
     raw_row = _hcat(raw_panels)
     seg_row = _hcat(seg_panels)
     diff_row = _hcat(diff_panels)
+    shape_row = _hcat(shape_panels)
 
     # First → last size change (mask area, falling back to the circle's area).
     def _area(d):
@@ -317,10 +341,12 @@ def render_track_strips(
 
     def _sep(w):
         return np.full((ROW_SEP, w, 3), 36, dtype=np.uint8)
-    both = np.vstack([hdr, raw_row, _sep(raw_row.shape[1]),
-                       seg_row, _sep(seg_row.shape[1]), diff_row])
+    s = raw_row.shape[1]
+    both = np.vstack([hdr, raw_row, _sep(s), seg_row, _sep(s),
+                       diff_row, _sep(s), shape_row])
     return {"raw": _png_bytes(np.vstack([hdr, raw_row])),
             "seg": _png_bytes(np.vstack([hdr, seg_row])),
             "diff": _png_bytes(np.vstack([hdr, diff_row])),
+            "shape": _png_bytes(np.vstack([hdr, shape_row])),
             "both": _png_bytes(both),
             "side": side, "n": len(raw_panels)}
