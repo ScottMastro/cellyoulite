@@ -104,6 +104,38 @@ def human_validated_map() -> dict:
         conn.close()
 
 
+# ---------------------------- track stars ----------------------------
+
+def get_stars(folder_name: str) -> dict:
+    """track_num -> True for every starred track in the well."""
+    conn = connect()
+    try:
+        w = conn.execute("SELECT id FROM well WHERE folder_name=?", (folder_name,)).fetchone()
+        if not w:
+            return {}
+        return {r["track_num"]: True for r in conn.execute(
+            "SELECT track_num FROM track WHERE well_id=? AND starred=1", (w["id"],))}
+    finally:
+        conn.close()
+
+
+def set_star(folder_name: str, track_num: int, starred: bool, by: str) -> bool:
+    conn = connect()
+    try:
+        wid = ensure_well(conn, folder_name)
+        tid = _ensure_track(conn, wid, int(track_num))
+        if starred:
+            conn.execute("UPDATE track SET starred=1, starred_by=?, starred_at=? WHERE id=?",
+                         (by or "unknown", _now(), tid))
+        else:
+            conn.execute("UPDATE track SET starred=0, starred_by=NULL, starred_at=NULL WHERE id=?",
+                         (tid,))
+        conn.commit()
+        return bool(starred)
+    finally:
+        conn.close()
+
+
 # ---------------------------- users ----------------------------
 
 def list_users() -> list[str]:

@@ -289,6 +289,7 @@ function renderAllTracks() {
       <div class="atr-info">
         <span class="atr-id" style="background: hsl(${hue.toFixed(0)},85%,60%)">#${t.id}</span>
         <span class="atr-meta">n=${t.n_detections}/${state.tracks.n_frames} · t${t.first_t}–t${t.last_t}</span>
+        <button class="atr-star${t.starred ? " on" : ""}" data-track-id="${t.id}" title="mark as exemplar">★</button>
         <button class="atr-gif" data-track-id="${t.id}" title="download GIF">GIF ↓</button>
       </div>
       <img class="atr-img" src="${stitchUrl}" loading="lazy"
@@ -311,6 +312,24 @@ function renderAllTracks() {
       await saveValidation();
       growth.fetchGrowthPlot(qs);
       boxplot.refreshBoxplot();
+    };
+    row.querySelector(".atr-star").onclick = async (e) => {
+      e.stopPropagation();
+      const star = e.currentTarget;
+      const next = !star.classList.contains("on");
+      star.classList.toggle("on", next);
+      const tk = state.tracks && state.tracks.tracks.find(x => x.id === id);
+      if (tk) tk.starred = next;
+      try {
+        await fetch(`/api/track-star?${qs}&track_id=${id}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ starred: next, user: state.user }),
+        });
+      } catch (err) {
+        star.classList.toggle("on", !next);   // revert on failure
+        if (tk) tk.starred = !next;
+      }
     };
     row.querySelector(".atr-img").onclick = () => showTrackStitch(id);
     row.querySelector(".atr-gif").onclick = async (e) => {

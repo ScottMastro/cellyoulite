@@ -610,7 +610,21 @@ def tracks_for_well(mount_id: str, folder_name: str) -> dict:
     except (OSError, ValueError):
         return {"available": False, "tracks": [], "n_frames": 0}
     data["available"] = True
+    stars = repo.get_stars(folder_name)
+    for t in data.get("tracks", []):
+        t["starred"] = stars.get(t.get("id"), False)
     return data
+
+
+@app.post("/api/track-star")
+def set_track_star(mount_id: str, folder_name: str, track_id: int,
+                   body: dict = Body(...)) -> dict:
+    """Toggle a track-level star ("a really good exemplar"), recording who
+    starred it and when."""
+    by = (body.get("user") or "").strip() or "unknown"
+    starred = bool(body.get("starred"))
+    repo.set_star(folder_name, track_id, starred, by)
+    return {"ok": True, "track_id": track_id, "starred": starred}
 
 
 @app.get("/api/track-stitch")
