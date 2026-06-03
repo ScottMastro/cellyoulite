@@ -1,12 +1,15 @@
-"""Render per-track stitched strips (one panel per frame).
+"""Render per-organoid stitched strips (one panel per frame).
 
-Two variants per track:
+Variants per organoid:
   - "raw"  — cropped raw frames with the timepoint label on top.
-  - "seg"  — same crop with the track's mask instance tinted in its hue.
+  - "seg"  — same crop with the organoid's mask instance tinted in its hue.
+  - "diff" — growth/loss of each frame vs the first-frame baseline mask
+             (centroid-aligned): retained grey, new growth blue, loss orange.
+  - "both" — raw + seg + diff stacked (the click-to-inspect view).
 
-Used by both the tracking script (pre-generates and caches per-track PNGs
+Used by both the tracking script (pre-generates and caches per-organoid PNGs
 when a well is processed) and the FastAPI server (falls back to on-demand
-rendering for any track that's not in the cache).
+rendering for any organoid that's not in the cache).
 """
 from __future__ import annotations
 
@@ -75,10 +78,22 @@ def _crop_to(frame: np.ndarray, cx: int, cy: int, side: int) -> np.ndarray:
     return crop
 
 
-def _label_strip(width: int, text: str) -> np.ndarray:
-    strip = np.zeros((LABEL_STRIP_H, width, 3), dtype=np.uint8)
-    cv2.putText(strip, text, (4, 13), cv2.FONT_HERSHEY_SIMPLEX, 0.42,
-                (255, 255, 255), 1, cv2.LINE_AA)
+def _text_metrics(side: int) -> tuple[float, int, int, int]:
+    """Font scale + thickness + label/header strip heights, all relative to the
+    crop size so the text reads the same at any organoid scale."""
+    fs = max(0.32, min(0.85, side / 240.0))
+    th = 1 if fs < 0.75 else 2
+    strip_h = max(13, int(round(side * 0.18)))
+    header_h = max(16, int(round(side * 0.20)))
+    return fs, th, strip_h, header_h
+
+
+def _label_strip(width: int, text: str, strip_h: int,
+                 font_scale: float, thickness: int) -> np.ndarray:
+    strip = np.zeros((strip_h, width, 3), dtype=np.uint8)
+    y = strip_h - max(3, int(strip_h * 0.25))
+    cv2.putText(strip, text, (4, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale,
+                (255, 255, 255), thickness, cv2.LINE_AA)
     return strip
 
 
@@ -97,11 +112,35 @@ def _hcat(panels: list[np.ndarray]) -> np.ndarray:
     return np.concatenate(pieces, axis=1)
 
 
-def _header(width: int, text: str) -> np.ndarray:
-    hdr = np.zeros((HEADER_H, width, 3), dtype=np.uint8)
-    cv2.putText(hdr, text, (6, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.50,
-                (220, 220, 220), 1, cv2.LINE_AA)
+def _header(width: int, text: str, header_h: int,
+            font_scale: float, thickness: int) -> np.ndarray:
+    hdr = np.zeros((header_h, width, 3), dtype=np.uint8)
+    y = header_h - max(4, int(header_h * 0.28))
+    cv2.putText(hdr, text, (6, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale,
+                (220, 220, 220), thickness, cv2.LINE_AA)
     return hdr
+
+
+def _diff_panel(base_bool, cur_bool, side: int) -> np.ndarray:
+    """Per-frame growth/loss vs the first-frame baseline mask (centroid-aligned
+    crops, so this is a pure size/shape change, not movement): retained area
+    grey, new growth blue, loss orange, on black."""
+    panel = np.zeros((side, side, 3), dtype=np.uint8)
+    GROW = (60, 130, 255)   # blue  (rgb)
+    LOSS = (255, 140, 30)   # orange (rgb)
+    KEEP = (150, 150, 150)  # retained
+    if base_bool is None and cur_bool is None:
+        return panel
+    if base_bool is None:
+        panel[cur_bool] = GROW
+        return panel
+    if cur_bool is None:
+        panel[base_bool] = LOSS
+        return panel
+    panel[base_bool & cur_bool] = KEEP
+    panel[cur_bool & ~base_bool] = GROW
+    panel[base_bool & ~cur_bool] = LOSS
+    return panel
 
 
 def _seg_overlay(raw_crop: np.ndarray, mask_crop: np.ndarray,
@@ -198,20 +237,28 @@ def render_track_strips(
     load_mask: Callable[[str], np.ndarray | None],
     pad: float = 1.4,
 ) -> dict[str, bytes]:
-    """Render both 'raw' and 'seg' strips for a single track.
-    Each detection in `detections` must have: label, cx, cy, r.
-    Returns {'raw': png_bytes, 'seg': png_bytes, 'side': int, 'n': int}."""
+    """Render 'raw', 'seg', and 'diff' strips for a single organoid, plus a
+    stacked 'both' (raw+seg+diff) for the click-to-inspect view.
+
+    Each detection needs: label, cx, cy, r (and area_px when available). The
+    header text scales with the crop size and reports the first→last size
+    change. The 'diff' strip compares each frame's mask to the first-frame
+    baseline (centroid-aligned): retained grey, new growth blue, loss orange.
+    Returns {'raw','seg','diff','both': png_bytes, 'side': int, 'n': int}."""
     if not detections:
         return {}
-    largest = max(detections, key=lambda d: d.get("r", 0))
+    dets = sorted(detections, key=lambda d: d.get("t_idx", 0))
+    largest = max(dets, key=lambda d: d.get("r", 0))
     side = max(32, int(round(2 * largest["r"] * pad)))
-    tr_rgb_tuple = hue_for_track(track_id)
-    tr_rgb = np.array(tr_rgb_tuple, dtype=np.float32)
+    tr_rgb = np.array(hue_for_track(track_id), dtype=np.float32)
+    font_scale, thickness, strip_h, header_h = _text_metrics(side)
 
-    fmt_label = _make_label_fmt([d["label"] for d in detections])
+    fmt_label = _make_label_fmt([d["label"] for d in dets])
     raw_panels: list[np.ndarray] = []
     seg_panels: list[np.ndarray] = []
-    for d in detections:
+    diff_panels: list[np.ndarray] = []
+    base_bool = None   # first-frame mask instance (baseline for the diff)
+    for d in dets:
         frame = load_frame(d["label"])
         if frame is None:
             continue
@@ -221,35 +268,52 @@ def render_track_strips(
             frame = np.clip(frame[..., :3], 0, 255).astype(np.uint8)
         cx, cy = int(round(d["cx"])), int(round(d["cy"]))
         raw_crop = _crop_to(frame[..., :3], cx, cy, side)
-        # Seg overlay: pick the mask label at this detection's centroid.
+        # Seg overlay + boolean instance: pick the mask label at the centroid.
         seg_crop = raw_crop.copy()
+        inst_bool = None
         mask = load_mask(d["label"])
         if mask is not None and mask.shape[0] == frame.shape[0] and mask.shape[1] == frame.shape[1]:
             label_here = int(mask[max(0, min(mask.shape[0] - 1, int(round(d["cy"])))),
                                     max(0, min(mask.shape[1] - 1, int(round(d["cx"]))))])
             if label_here != 0:
                 mask_crop = _crop_to(mask, cx, cy, side)
+                inst_bool = mask_crop == label_here
                 seg_crop = _seg_overlay(raw_crop, mask_crop, label_here, tr_rgb)
-        strip = _label_strip(side, fmt_label(d["label"]))
+        if base_bool is None and inst_bool is not None:
+            base_bool = inst_bool
+        diff_crop = _diff_panel(base_bool, inst_bool, side)
+        strip = _label_strip(side, fmt_label(d["label"]), strip_h, font_scale, thickness)
         raw_panels.append(np.vstack([strip, raw_crop]))
         seg_panels.append(np.vstack([strip, seg_crop]))
+        diff_panels.append(np.vstack([strip, diff_crop]))
 
     if not raw_panels:
         return {}
 
     raw_row = _hcat(raw_panels)
     seg_row = _hcat(seg_panels)
-    hdr_text = (f"track {track_id} · n={len(raw_panels)} · "
-                f"crop={side}px (largest r={largest['r']:.0f})")
-    hdr = _header(raw_row.shape[1], hdr_text)
-    raw_full = np.vstack([hdr, raw_row])
-    seg_full = np.vstack([hdr, seg_row])
-    # Both-row variant used by the click-to-inspect endpoint.
-    both = np.vstack([hdr,
-                       raw_row,
-                       np.full((ROW_SEP, raw_row.shape[1], 3), 36, dtype=np.uint8),
-                       seg_row])
-    return {"raw": _png_bytes(raw_full),
-            "seg": _png_bytes(seg_full),
+    diff_row = _hcat(diff_panels)
+
+    # First → last size change (mask area, falling back to the circle's area).
+    def _area(d):
+        a = d.get("area_px")
+        if a:
+            return float(a)
+        r = float(d.get("r", 0) or 0)
+        return 3.14159 * r * r
+    a0, a1 = _area(dets[0]), _area(dets[-1])
+    pct = ((a1 - a0) / a0 * 100.0) if a0 else 0.0
+    # ASCII only — cv2's Hershey font renders "·"/"Δ"/"±" as "?".
+    size_txt = f"{'+' if pct >= 0 else '-'}{abs(pct):.0f}%"
+    hdr_text = f"organoid {track_id} | n={len(raw_panels)} | size {size_txt}"
+    hdr = _header(raw_row.shape[1], hdr_text, header_h, font_scale, thickness)
+
+    def _sep(w):
+        return np.full((ROW_SEP, w, 3), 36, dtype=np.uint8)
+    both = np.vstack([hdr, raw_row, _sep(raw_row.shape[1]),
+                       seg_row, _sep(seg_row.shape[1]), diff_row])
+    return {"raw": _png_bytes(np.vstack([hdr, raw_row])),
+            "seg": _png_bytes(np.vstack([hdr, seg_row])),
+            "diff": _png_bytes(np.vstack([hdr, diff_row])),
             "both": _png_bytes(both),
             "side": side, "n": len(raw_panels)}
