@@ -46,6 +46,15 @@ async def _revalidate_static(request: Request, call_next):
     return resp
 
 
+# Create/upgrade the SQLite schema on startup (no endpoint reads it yet).
+try:
+    from cellyoulite.db.migrate import migrate as _db_migrate
+    _db_migrate()
+except Exception as _db_err:  # noqa: BLE001 — DB is not yet on any request path
+    import sys as _sys
+    print(f"[cellyoulite] DB init skipped: {_db_err}", file=_sys.stderr)
+
+
 # ---------------------- data folder ----------------------
 # Single rooted folder: `$CELLYOULITE_DATA` or `./data` (relative to cwd).
 # Internal "mount" abstraction is kept (so keys stay <mount_id>/<rest>) but

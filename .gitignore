@@ -35,5 +35,10 @@ build/
 # Password-less user-account registry (runtime state, created on first use)
 /users.json
 
+# SQLite database (+ WAL/SHM sidecars) — created/migrated at runtime
+/cellyoulite.db
+/cellyoulite.db-wal
+/cellyoulite.db-shm
+
 # Editor / agent state
 /.claude/
