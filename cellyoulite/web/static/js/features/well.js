@@ -292,7 +292,9 @@ function renderAllTracks() {
   listEl.innerHTML = sorted.map(t => {
     const hue = (t.id * 137.508) % 360;
     const accepted = isTrackAccepted(t);
-    const stitchUrl = `/api/track-stitch?${qs}&track_id=${t.id}&variant=${variant}`;
+    // Small JPEG thumbnail for the row (the row is 88px tall; the full-res
+    // strip is ~0.5 MB and only needed in the click-to-inspect view).
+    const stitchUrl = `/api/track-stitch?${qs}&track_id=${t.id}&variant=${variant}&thumb=128`;
     return `<div class="atr-row ${accepted ? "atr-good" : "atr-bad"}" data-track-id="${t.id}">
       <label class="atr-switch" title="${accepted ? "accepted" : "rejected"}">
         <input type="checkbox" ${accepted ? "checked" : ""}>

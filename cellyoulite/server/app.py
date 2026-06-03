@@ -438,6 +438,10 @@ def _cellpose_done_labels(well_folder: str) -> set[str]:
 # ---------------------- tracking ----------------------
 
 _TRACKS_ROOT = Path.cwd() / "tracks"
+# Downscaled JPEG thumbnails of the per-organoid stitch strips, for the list
+# rows (cached on disk, keyed by the source strip's mtime so it self-invalidates
+# when a strip is re-rendered).
+_STITCH_THUMB_ROOT = Path.cwd() / ".stitch_thumbs"
 _track_job: dict = {
     "proc": None, "started_at": None, "stopped_at": None,
     "returncode": None, "last_log": [], "last_line": "",
@@ -618,20 +622,51 @@ def set_track_star(mount_id: str, folder_name: str, track_id: int,
     return {"ok": True, "track_id": track_id, "starred": starred}
 
 
+def _stitch_thumb(cached: Path, folder_name: str, track_id: int,
+                  variant: str, thumb: int) -> Response:
+    """Serve a small JPEG of a cached stitch strip, downscaled to `thumb` px
+    tall. Cached on disk and keyed by the source strip's mtime."""
+    mtime = cached.stat().st_mtime_ns
+    tag = hashlib.sha1(f"{folder_name}|{track_id}|{variant}|{thumb}|{mtime}".encode()).hexdigest()
+    tpath = _STITCH_THUMB_ROOT / f"{tag}.jpg"
+    if not tpath.is_file():
+        arr = cv2.imread(str(cached), cv2.IMREAD_COLOR)
+        if arr is None:
+            return FileResponse(cached, media_type="image/png")
+        h, w = arr.shape[:2]
+        if h > thumb:
+            arr = cv2.resize(arr, (max(1, round(w * thumb / h)), thumb),
+                             interpolation=cv2.INTER_AREA)
+        ok, buf = cv2.imencode(".jpg", arr, [int(cv2.IMWRITE_JPEG_QUALITY), 82])
+        if not ok:
+            return FileResponse(cached, media_type="image/png")
+        _STITCH_THUMB_ROOT.mkdir(parents=True, exist_ok=True)
+        tmp = tpath.with_suffix(".jpg.tmp")
+        tmp.write_bytes(buf.tobytes())
+        tmp.replace(tpath)
+    return FileResponse(tpath, media_type="image/jpeg",
+                        headers={"Cache-Control": "public, max-age=86400"})
+
+
 @app.get("/api/track-stitch")
 def track_stitch(mount_id: str, folder_name: str, track_id: int,
-                  variant: str = "both", pad: float = 1.4) -> Response:
+                  variant: str = "both", pad: float = 1.4, thumb: int = 0) -> Response:
     """For one track, crop a square region around its centre in every frame
     where it appears and concatenate horizontally into a wide PNG.
     variant=raw → just the raw row; variant=seg → just the segmented row;
     variant=diff → growth/loss tinted on the raw organoid; variant=shape →
     the growth/loss silhouette on black; variant=both → raw+seg+diff+shape
     stacked (default). Cached versions from the tracking script are served
-    when available."""
+    when available. thumb=<px> serves a small JPEG (downscaled to that height)
+    for list rows — the full-res strip is ~0.5 MB, far too big at row size."""
     if variant not in ("raw", "seg", "diff", "shape", "both"):
         raise HTTPException(status_code=400, detail="variant must be raw/seg/diff/shape/both")
     safe = folder_name.replace("/", "_")
     cached = _TRACKS_ROOT / safe / f"track_{track_id}_{variant}.png"
+    # Small JPEG thumbnail for the organoid list (only when the full-res strip is
+    # cached — otherwise fall through and render/serve full-res).
+    if thumb and thumb > 0 and cached.is_file():
+        return _stitch_thumb(cached, folder_name, track_id, variant, int(thumb))
     if cached.is_file() and variant in ("raw", "seg", "diff", "shape", "both"):
         return FileResponse(cached, media_type="image/png")
 
@@ -1158,6 +1193,7 @@ async def bundle_import(request: Request) -> dict:
     import shutil
     shutil.rmtree(_IMG_CACHE_ROOT, ignore_errors=True)
     shutil.rmtree(_EDGES_CACHE_ROOT, ignore_errors=True)
+    shutil.rmtree(_STITCH_THUMB_ROOT, ignore_errors=True)
     # Translate the just-extracted analysis results into DB rows.
     ingested = _ingest_results_to_db(sorted(updated))
     return {"ok": True, "manifest": manifest,
