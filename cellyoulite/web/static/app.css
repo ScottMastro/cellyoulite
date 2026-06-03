@@ -558,9 +558,22 @@ button.ghost:hover { border-color: var(--err); color: var(--err); }
   background: #05080c;
   display: flex; align-items: center; justify-content: center;
   padding: 1rem;
-  height: 75vh;
-  min-height: 480px;
+  height: 50vh;
+  min-height: 360px;
 }
+
+/* Fullscreen mode: the viewer pane fills the window and the canvas grows to
+   take all the room left by the toolbar / playbar / filmstrip. */
+.viewer-pane.fs {
+  position: fixed; inset: 0; z-index: 1000;
+  margin: 0; max-width: none; width: 100%;
+  background: #05080c;
+  padding: .6rem 1rem; overflow: auto;
+}
+.viewer-pane.fs h2 { margin: 0 0 .4rem; }
+.viewer-pane.fs #well-close { display: none; }  /* the ✕ exits fullscreen; avoid two close-alikes */
+.viewer-pane.fs .viewer { display: flex; flex-direction: column; height: calc(100vh - 2.2rem); }
+.viewer-pane.fs .viewer-canvas { flex: 1 1 auto; height: auto; min-height: 0; }
 .image-stack {
   position: relative;
   display: inline-block;
