@@ -4,6 +4,7 @@
 import { state } from "../core/state.js";
 import * as grid from "./grid.js";
 import * as well from "./well.js";
+import * as boxplot from "./boxplot.js";
 
 export async function refreshCellposeStatus() {
   try {
@@ -59,6 +60,9 @@ export async function refreshAll() {
   // paint of the well thumbnails already knows which wells are tracked.
   await Promise.all([refreshCellposeStatus(), refreshTrackStatus()]);
   await grid.refreshGrid();
+  // Growth distributions are global (independent of any well selection) — show
+  // the "all conditions" overview as soon as the app loads.
+  boxplot.refreshBoxplot();
 }
 
 async function combinedPoll() {

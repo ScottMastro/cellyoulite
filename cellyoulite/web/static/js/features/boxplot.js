@@ -2,28 +2,29 @@
 import { $ } from "../core/dom.js";
 import { state } from "../core/state.js";
 
-function setBoxTab(mode) {
-  state.boxMode = mode;
-  document.querySelectorAll(".tab-btn").forEach(b => {
-    b.classList.toggle("active", b.dataset.mode === mode);
-  });
+function setDrill(treatment) {
+  // null = the "all conditions" overview; a treatment name = zoomed in.
+  state.boxDrill = treatment;
   refreshBoxplot();
 }
 
+// The Growth distributions are independent of the playback selection: they
+// always pool every well, showing all conditions by default and a single
+// condition when the user clicks one to zoom in.
 export async function refreshBoxplot() {
   const wrap = $("boxplot-card");
-  if (state.boxMode === "one" && !state.well) { wrap.hidden = true; return; }
+  const drill = state.boxDrill;
   const byRep = $("box-by-rep").checked ? 1 : 0;
-  const treatmentQs = state.boxMode === "one"
-    ? `&treatment=${encodeURIComponent(state.well.treatment)}` : "";
-  const url = `/api/boxplot-data?by_replicate=${byRep}${treatmentQs}`;
+  const starsOnly = $("box-stars-only").checked ? 1 : 0;
+  if ($("box-back")) $("box-back").hidden = !drill;
+  const treatmentQs = drill ? `&treatment=${encodeURIComponent(drill)}` : "";
+  const url = `/api/boxplot-data?by_replicate=${byRep}&stars_only=${starsOnly}${treatmentQs}`;
   $("boxplot").innerHTML = `<div class="hint" style="padding:8px">computing…</div>`;
   try {
     const r = await fetch(url);
-    if (!r.ok) { $("boxplot").innerHTML = `<div class="hint">error: ${r.statusText}</div>`; return; }
-    const data = await r.json();
     wrap.hidden = false;
-    renderBoxplot(data);
+    if (!r.ok) { $("boxplot").innerHTML = `<div class="hint">error: ${r.statusText}</div>`; return; }
+    renderBoxplot(await r.json());
   } catch (e) { $("boxplot").innerHTML = `<div class="hint">error: ${e}</div>`; }
 }
 
@@ -63,7 +64,8 @@ function renderBoxplot(data) {
   const minutes = data.minutes || [];
   const boxes = data.boxes || [];
   if (!boxes.length) {
-    $("boxplot").innerHTML = `<div class="hint" style="padding:8px">no accepted tracks yet</div>`;
+    const msg = $("box-stars-only").checked ? "no starred organoids" : "no accepted organoids yet";
+    $("boxplot").innerHTML = `<div class="hint" style="padding:8px">${msg}</div>`;
     $("box-summary").textContent = "";
     return;
   }
@@ -97,13 +99,13 @@ function renderBoxplot(data) {
   $("box-summary").innerHTML =
     `<strong>${treatments.length}</strong> treatment(s) · `
     + `<strong>${minutes.length}</strong> timepoints · `
-    + `<strong>${totalN}</strong> track-frame observations`;
+    + `<strong>${totalN}</strong> organoid-frame observations`;
 
   const replicates = data.replicates || [];
   const byRep = !!data.by_replicate;
   const series = byRep && replicates.length ? replicates : [null];
 
-  if (state.boxMode === "one" || treatments.length === 1) {
+  if (state.boxDrill || treatments.length === 1) {
     const svg = renderBoxSubplot({
       title: treatments[0] || "",
       boxes: tBoxes, minutes, treatments, series, byRep, scale,
@@ -127,9 +129,14 @@ function renderBoxplot(data) {
       yMin, yMax,
       width: subWidth, height: subHeight, large: false,
     });
-    return `<div class="boxplot-facet">${sub}</div>`;
+    const safe = t.replace(/"/g, "&quot;");
+    return `<div class="boxplot-facet" data-treatment="${safe}" title="click to zoom">${sub}</div>`;
   }).join("");
   $("boxplot").innerHTML = `<div class="boxplot-grid">${tiles}</div>`;
+  // Click a facet → zoom into that condition.
+  $("boxplot").querySelectorAll(".boxplot-facet[data-treatment]").forEach(el => {
+    el.onclick = () => setDrill(el.dataset.treatment);
+  });
 }
 
 function renderBoxSubplot({ title, boxes, minutes, treatments, series, byRep, scale,
@@ -284,8 +291,8 @@ function renderBoxSubplot({ title, boxes, minutes, treatments, series, byRep, sc
 }
 
 export function initBoxplot() {
-  $("box-tab-one").onclick = () => setBoxTab("one");
-  $("box-tab-all").onclick = () => setBoxTab("all");
+  $("box-back").onclick = () => setDrill(null);
+  $("box-stars-only").onchange = () => refreshBoxplot();
   $("box-by-rep").onchange = () => refreshBoxplot();
   $("box-scale").onchange = () => refreshBoxplot();
   $("box-csv").onclick = async () => {
@@ -293,8 +300,8 @@ export function initBoxplot() {
     const orig = btn.textContent;
     btn.disabled = true; btn.textContent = "…";
     try {
-      const url = state.boxMode === "one" && state.well
-        ? `/api/growth-csv?treatment=${encodeURIComponent(state.well.treatment)}`
+      const url = state.boxDrill
+        ? `/api/growth-csv?treatment=${encodeURIComponent(state.boxDrill)}`
         : `/api/growth-csv`;
       const r = await fetch(url);
       if (!r.ok) throw new Error(r.statusText);
@@ -302,8 +309,8 @@ export function initBoxplot() {
       const objectUrl = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = objectUrl;
-      const fname = state.boxMode === "one" && state.well
-        ? `growth_${state.well.treatment.replace(/\s+/g, "_").replace(/\+/g, "p")}.csv`
+      const fname = state.boxDrill
+        ? `growth_${state.boxDrill.replace(/\s+/g, "_").replace(/\+/g, "p")}.csv`
         : "growth_all.csv";
       a.download = fname;
       a.click();
