@@ -44,7 +44,6 @@ def _match(gt, pred):
 def main():
     ann_root = Path("annotations")
     cache_root = Path(".cellpose_cache")
-    rows = []
     agg = {"tp": 0, "fp": 0, "fn": 0, "star_tp": 0, "star_fn": 0,
            "ce": [], "re": []}
 

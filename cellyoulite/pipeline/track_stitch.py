@@ -11,7 +11,6 @@ rendering for any track that's not in the cache).
 from __future__ import annotations
 
 import re
-from pathlib import Path
 from typing import Callable
 
 import cv2

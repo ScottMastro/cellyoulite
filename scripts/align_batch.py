@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import argparse
 import time
-from pathlib import Path
 
 from cellyoulite.io.grid import discover_grid
 from cellyoulite.pipeline.align import (

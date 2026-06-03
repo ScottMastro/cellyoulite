@@ -23,7 +23,6 @@ from collections import defaultdict
 from pathlib import Path
 
 import cv2
-import imageio.v2 as imageio
 import numpy as np
 from scipy.ndimage import gaussian_laplace, maximum_filter
 from skimage.io import imread
