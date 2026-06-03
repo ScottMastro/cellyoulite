@@ -723,7 +723,7 @@ button.ghost:hover { border-color: var(--err); color: var(--err); }
   padding: 8px 12px; background: #1a1f29; border-bottom: 1px solid var(--rule);
   flex-wrap: wrap;
 }
-.all-tracks-head .hint { margin-right: auto; font: 500 12px var(--mono); }
+.all-tracks-head .hint { margin: 0 auto 0 0; font: 500 12px var(--mono); }
 .all-tracks-list {
   max-height: 460px; overflow-y: auto; padding: 4px 0;
 }
