@@ -507,8 +507,24 @@ export function initWell() {
 
   $("play-btn").onclick = () => { state.playTimer ? stopPlay() : startPlay(); };
   $("speed").onchange = () => { /* picked up on the next _playStep tick */ };
+
+  // Fullscreen: blow the viewer pane up to fill the window. The image/overlays
+  // scale via CSS (height:100% + the SVG viewBox), so no reload is needed.
+  const setFullscreen = (on) => {
+    const card = $("well-card");
+    card.classList.toggle("fs", on);
+    const btn = $("viewer-fs");
+    btn.textContent = on ? "✕" : "⛶";
+    btn.title = on ? "exit fullscreen (Esc)" : "fullscreen";
+  };
+  $("viewer-fs").onclick = () => setFullscreen(!$("well-card").classList.contains("fs"));
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && $("well-card").classList.contains("fs")) setFullscreen(false);
+  });
+
   $("well-close").onclick = () => {
     stopPlay();
+    setFullscreen(false);
     $("well-card").hidden = true;
     $("tracks-card").hidden = true;
   };
