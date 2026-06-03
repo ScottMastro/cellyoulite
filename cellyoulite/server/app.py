@@ -414,6 +414,10 @@ def warm_alignments() -> dict:
 # ---------------------- cellpose cache status ----------------------
 
 _CELLPOSE_CACHE_ROOT = Path.cwd() / ".cellpose_cache"
+# Rendered cellpose-edges overlay PNGs (transparent boundary layer). Expensive
+# to recompute every playback frame, so cached on disk keyed by mask mtime +
+# render params + the well's validation signature (see /api/cellpose-edges).
+_EDGES_CACHE_ROOT = Path.cwd() / ".edges_cache"
 
 
 def _cellpose_done_labels(well_folder: str) -> set[str]:
@@ -1143,9 +1147,11 @@ async def bundle_import(request: Request) -> dict:
         raise HTTPException(status_code=400, detail=f"bad tar: {e}")
     # Reset in-memory caches so the just-restored disk state is picked up.
     _align_cache.clear()
-    # Imported results may change alignment → drop the rendered-image cache.
+    # Imported results may change alignment/segmentation → drop the rendered
+    # image and edges caches so they re-render against the new data.
     import shutil
     shutil.rmtree(_IMG_CACHE_ROOT, ignore_errors=True)
+    shutil.rmtree(_EDGES_CACHE_ROOT, ignore_errors=True)
     # Translate the just-extracted analysis results into DB rows.
     ingested = _ingest_results_to_db(sorted(updated))
     return {"ok": True, "manifest": manifest,
@@ -1559,6 +1565,29 @@ def cellpose_edges(key: str, aligned: int = 1, by_track: int = 1,
         bgra = np.zeros((1, 1, 4), dtype=np.uint8)
         ok, png = cv2.imencode(".png", bgra)
         return Response(content=png.tobytes(), media_type="image/png")
+
+    # Disk cache: rendering the boundary PNG every playback frame is the
+    # overlay lag. Key on the mask mtime + render params + the well's
+    # validation signature (accept/reject decides the colours), so curation
+    # changes invalidate it. Browser caching is enabled too; the client busts
+    # it via the &v=overlayVersion param when overrides change.
+    try:
+        mask_mtime = mask_path.stat().st_mtime_ns
+    except OSError:
+        mask_mtime = 0
+    val_sig = ""
+    if by_track:
+        ov = repo.get_validation(well_folder)["overrides"]
+        val_sig = json.dumps(sorted((int(k), bool(v)) for k, v in ov.items()))
+    tag = hashlib.sha1(
+        f"{key}|{aligned}|{by_track}|{fill}|{fill_alpha}|{hide_invalid}|"
+        f"{mask_mtime}|{val_sig}".encode()).hexdigest()
+    cache_path = _EDGES_CACHE_ROOT / f"{tag}.png"
+    if cache_path.is_file():
+        return Response(content=cache_path.read_bytes(), media_type="image/png",
+                        headers={"Cache-Control": "public, max-age=86400",
+                                 "ETag": f'"{tag}"'})
+
     masks = cv2.imread(str(mask_path), cv2.IMREAD_UNCHANGED)
     if masks is None:
         raise HTTPException(status_code=500, detail="bad mask png")
@@ -1606,7 +1635,14 @@ def cellpose_edges(key: str, aligned: int = 1, by_track: int = 1,
     ok, png = cv2.imencode(".png", bgra)
     if not ok:
         raise HTTPException(status_code=500, detail="png encode failed")
-    return Response(content=png.tobytes(), media_type="image/png")
+    data = png.tobytes()
+    _EDGES_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+    tmp = cache_path.with_suffix(".png.tmp")
+    tmp.write_bytes(data)
+    tmp.replace(cache_path)   # atomic publish
+    return Response(content=data, media_type="image/png",
+                    headers={"Cache-Control": "public, max-age=86400",
+                             "ETag": f'"{tag}"'})
 
 
 def _well_tp_index(mount, well, filename):
