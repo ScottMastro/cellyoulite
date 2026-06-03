@@ -899,7 +899,6 @@ def well_gif(mount_id: str, folder_name: str,
     that shows up as borders in the GIF."""
     import io
     import imageio.v2 as imageio
-    from skimage.transform import resize as _resize
 
     mount, well = _find_well(mount_id, folder_name)
     safe = folder_name.replace("/", "_")
@@ -1380,8 +1379,6 @@ def align_job() -> dict:
 
 # ---------------------- cellpose run / cancel ----------------------
 
-import subprocess
-import sys
 import threading
 import time as _time
 

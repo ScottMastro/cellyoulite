@@ -130,7 +130,7 @@ def inspect(bundle: Path) -> None:
     print(f"  created_at : {manifest.get('created_at')}")
     print(f"  include_raw: {manifest.get('include_raw')}")
     print(f"  source     : {manifest.get('source_root')}")
-    print(f"  contents:")
+    print("  contents:")
     for c in manifest.get("contents", []):
         print(f"    {c['name']:18s}  {c['files']:5d} files  {_human(c['bytes']):>9s}")
 

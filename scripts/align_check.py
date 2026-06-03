@@ -75,7 +75,6 @@ def make_well_gif(well, out_path: Path, *, width: int = 380, fps: int = 6) -> No
     raw_small = [_resize_to_width(f, width) for f in raw_frames]
     al_small = [_resize_to_width(f, width) for f in aligned_frames]
 
-    gap = np.zeros((1, 6, 3), dtype=np.uint8)  # placeholder column
     composed: list[np.ndarray] = []
     for i, (r, a) in enumerate(zip(raw_small, al_small)):
         r, a = _pad_to_same_height(r, a)
