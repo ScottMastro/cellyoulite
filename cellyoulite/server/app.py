@@ -18,6 +18,7 @@ from skimage.segmentation import find_boundaries
 from starlette.requests import Request
 
 from cellyoulite.__version__ import __version__
+from cellyoulite.db import repo
 from cellyoulite.io.grid import (
     discover_grid, is_experiment_folder, is_image_name,
 )
@@ -202,36 +203,24 @@ def reveal() -> dict:
 
 
 # ---------------------- user accounts ----------------------
-# Password-less profiles. The deployment sits behind an upstream HTTP
-# basic-auth gate; once past that, a user just picks (or creates) a
-# username — there are no per-account credentials. Stored as a flat JSON
-# list under cwd, alongside tracks/ and out/.
+# Password-less profiles, stored in the DB (app_user). The deployment sits
+# behind an upstream HTTP basic-auth gate; once past that, a user just picks
+# (or creates) a username — there are no per-account credentials. users.json
+# is dual-written as a one-release safety net (see DB.md phase 6 to drop it).
 
 _USERS_PATH = Path.cwd() / "users.json"
 
 
-def _load_users() -> list[str]:
+def _mirror_users_json() -> None:
     try:
-        data = json.loads(_USERS_PATH.read_text())
-    except (OSError, ValueError):
-        return []
-    raw = data.get("users", []) if isinstance(data, dict) else data
-    out: list[str] = []
-    seen: set[str] = set()
-    for u in raw if isinstance(raw, list) else []:
-        if isinstance(u, str) and u.strip() and u.strip().lower() not in seen:
-            out.append(u.strip())
-            seen.add(u.strip().lower())
-    return out
-
-
-def _save_users(users: list[str]) -> None:
-    _USERS_PATH.write_text(json.dumps({"users": users}, indent=2))
+        _USERS_PATH.write_text(json.dumps({"users": repo.list_users()}, indent=2))
+    except OSError:
+        pass
 
 
 @app.get("/api/users")
 def list_users() -> dict:
-    return {"users": _load_users()}
+    return {"users": repo.list_users()}
 
 
 @app.post("/api/users")
@@ -241,14 +230,10 @@ def create_user(body: dict = Body(...)) -> dict:
         raise HTTPException(status_code=400, detail="username required")
     if len(name) > 40:
         raise HTTPException(status_code=400, detail="username too long (max 40)")
-    users = _load_users()
-    for u in users:                       # case-insensitive de-dup
-        if u.lower() == name.lower():
-            return {"ok": True, "username": u, "users": users, "created": False}
-    users.append(name)
-    users.sort(key=str.lower)
-    _save_users(users)
-    return {"ok": True, "username": name, "users": users, "created": True}
+    username, created = repo.create_user(name)
+    if created:
+        _mirror_users_json()
+    return {"ok": True, "username": username, "users": repo.list_users(), "created": created}
 
 
 @app.get("/api/grid")
@@ -452,6 +437,7 @@ def track_status() -> dict:
     after the tracks file was written, the well counts as stale."""
     rows = []
     n_total = 0; n_done = 0
+    hv = repo.human_validated_map()   # one query for all wells (polled often)
     for mount in _mounts():
         try:
             spec = _wells_for_mount(mount)
@@ -473,7 +459,7 @@ def track_status() -> dict:
                 "folder_name": w.folder_name,
                 "done": done,
                 "stale": stale,
-                "human_validated": _is_human_validated(w.folder_name),
+                "human_validated": hv.get(w.folder_name, False),
             })
             n_total += 1
             n_done += 1 if done else 0
@@ -548,23 +534,27 @@ def _validation_path(well_folder: str) -> Path:
     return _TRACKS_ROOT / f"{safe}__validation.json"
 
 
-def _load_validation_raw(well_folder: str) -> dict:
-    p = _validation_path(well_folder)
-    if not p.is_file():
-        return {}
-    try:
-        return json.loads(p.read_text())
-    except (OSError, ValueError):
-        return {}
-
-
+# Validation (track filters + well sign-off) now lives in the DB; these helpers
+# read it so every consumer (grid, growth, boxplot, CSV) sees the same source.
 def _load_validation(well_folder: str) -> dict[int, bool]:
-    data = _load_validation_raw(well_folder)
-    return {int(k): bool(v) for k, v in data.get("overrides", {}).items()}
+    return repo.get_validation(well_folder)["overrides"]
 
 
 def _is_human_validated(well_folder: str) -> bool:
-    return bool(_load_validation_raw(well_folder).get("human_validated"))
+    return repo.get_validation(well_folder)["human_validated"]
+
+
+def _mirror_validation_json(folder_name: str, state: dict) -> None:
+    """Dual-write the JSON mirror (one-release safety net; drop in DB phase 6)."""
+    try:
+        _TRACKS_ROOT.mkdir(parents=True, exist_ok=True)
+        _validation_path(folder_name).write_text(json.dumps({
+            "well": folder_name,
+            "overrides": {str(k): v for k, v in state["overrides"].items()},
+            "human_validated": state["human_validated"],
+        }, indent=2))
+    except OSError:
+        pass
 
 
 @app.get("/api/track-validation")
@@ -574,10 +564,10 @@ def get_track_validation(mount_id: str, folder_name: str) -> dict:
     tracks fall back to their script-assigned `valid` field if no override.
     Also returns `human_validated` — whether a human has signed off on the
     whole well via the Validate button."""
-    overrides = _load_validation(folder_name)
+    state = repo.get_validation(folder_name)
     return {"well": folder_name,
-            "overrides": {str(k): v for k, v in overrides.items()},
-            "human_validated": _is_human_validated(folder_name)}
+            "overrides": {str(k): v for k, v in state["overrides"].items()},
+            "human_validated": state["human_validated"]}
 
 
 @app.post("/api/track-validation")
@@ -586,30 +576,25 @@ def set_track_validation(mount_id: str, folder_name: str,
     """Update the validation state for a well. Body may contain:
       - overrides: {id: bool}  → replaces the per-track override map
       - human_validated: bool   → flips the well-level sign-off
+      - user: str               → who is making the decision (provenance)
 
     Either field may be omitted; existing values are preserved when so."""
-    existing = _load_validation_raw(folder_name)
-    # overrides: replace if provided
+    decided_by = (body.get("user") or "").strip() or "unknown"
     if "overrides" in body:
-        raw = body.get("overrides") or {}
-        cleaned: dict[str, bool] = {}
-        for k, v in raw.items():
+        cleaned: dict[int, bool] = {}
+        for k, v in (body.get("overrides") or {}).items():
             try:
-                cleaned[str(int(k))] = bool(v)
+                cleaned[int(k)] = bool(v)
             except (TypeError, ValueError):
                 continue
-        existing["overrides"] = cleaned
-    else:
-        existing.setdefault("overrides", {})
-    # human_validated: flip if provided
+        repo.set_overrides(folder_name, cleaned, decided_by)
     if "human_validated" in body:
-        existing["human_validated"] = bool(body["human_validated"])
-    existing["well"] = folder_name
-    _TRACKS_ROOT.mkdir(parents=True, exist_ok=True)
-    _validation_path(folder_name).write_text(json.dumps(existing, indent=2))
+        repo.set_human_validated(folder_name, bool(body["human_validated"]), decided_by)
+    state = repo.get_validation(folder_name)
+    _mirror_validation_json(folder_name, state)
     return {"ok": True,
-            "n_overrides": len(existing.get("overrides", {})),
-            "human_validated": bool(existing.get("human_validated"))}
+            "n_overrides": len(state["overrides"]),
+            "human_validated": state["human_validated"]}
 
 
 @app.get("/api/tracks")

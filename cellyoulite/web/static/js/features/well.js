@@ -347,7 +347,7 @@ async function saveValidation() {
     await fetch(`/api/track-validation?${qs}`, {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({overrides: state.validation}),
+      body: JSON.stringify({overrides: state.validation, user: state.user}),
     });
   } catch (e) {}
 }
@@ -447,7 +447,7 @@ export function initWell() {
       const r = await fetch(`/api/track-validation?${qs}`, {
         method: "POST",
         headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({human_validated: next}),
+        body: JSON.stringify({human_validated: next, user: state.user}),
       });
       if (!r.ok) { setStatus("err", `validate: ${r.statusText}`); return; }
       state.humanValidatedByWell.set(state.well.folder_name, next);
