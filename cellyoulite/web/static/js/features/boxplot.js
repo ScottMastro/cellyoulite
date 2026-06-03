@@ -19,7 +19,9 @@ export async function refreshBoxplot() {
   if ($("box-back")) $("box-back").hidden = !drill;
   const treatmentQs = drill ? `&treatment=${encodeURIComponent(drill)}` : "";
   const url = `/api/boxplot-data?by_replicate=${byRep}&stars_only=${starsOnly}${treatmentQs}`;
-  $("boxplot").innerHTML = `<div class="hint" style="padding:8px">computing…</div>`;
+  // Keep the current plot in place while the (cached, fast) fetch runs — don't
+  // collapse it to a placeholder, which shrinks the page and makes the scroll
+  // jump up.
   try {
     const r = await fetch(url);
     wrap.hidden = false;
