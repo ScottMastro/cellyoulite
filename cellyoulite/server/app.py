@@ -302,36 +302,60 @@ def well(mount_id: str, folder_name: str) -> dict:
 _BROWSER_NATIVE = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 
 
-@app.get("/api/image")
-def image(key: str, thumb: int = 0, aligned: int = 0) -> Response:
-    """Serve an image. TIFFs (and any non-browser-native format) are
-    re-encoded to JPEG. `thumb=<px>` downscales the longest side.
-    `aligned=1` pads the frame onto its well's registered canvas."""
-    path = _safe_image_path(key)
-    if path.suffix.lower() in _BROWSER_NATIVE and not thumb and not aligned:
-        return FileResponse(path)
+# Decoded+resized JPEGs are cached on disk so we don't re-decode the (LZW)
+# TIFF and re-encode on every request — the dominant cost for grid thumbs,
+# the viewer, and especially frame-by-frame playback. Invalidated by source
+# mtime (raw) and cleared on bundle-import (alignment may change).
+_IMG_CACHE_ROOT = Path.cwd() / ".img_cache"
 
-    if aligned:
-        img = _read_aligned(key)
-    else:
-        img = imread(path)
+
+def _render_image_jpeg(key: str, thumb: int, aligned: int) -> bytes:
+    path = _safe_image_path(key)
+    img = _read_aligned(key) if aligned else imread(path)
     if img.ndim == 2:
         img = np.stack([img, img, img], axis=-1)
     if img.dtype != np.uint8:
         img = np.clip(img, 0, 255).astype(np.uint8)
     bgr = cv2.cvtColor(img[..., :3], cv2.COLOR_RGB2BGR)
-
     if thumb and thumb > 0:
         h, w = bgr.shape[:2]
         scale = thumb / max(h, w)
         if scale < 1.0:
             bgr = cv2.resize(bgr, (max(1, int(w * scale)), max(1, int(h * scale))),
                              interpolation=cv2.INTER_AREA)
-
     ok, buf = cv2.imencode(".jpg", bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
     if not ok:
         raise HTTPException(status_code=500, detail="jpeg encode failed")
-    return Response(content=buf.tobytes(), media_type="image/jpeg")
+    return buf.tobytes()
+
+
+@app.get("/api/image")
+def image(key: str, thumb: int = 0, aligned: int = 0) -> Response:
+    """Serve an image. TIFFs (and any non-browser-native format) are
+    re-encoded to JPEG. `thumb=<px>` downscales the longest side.
+    `aligned=1` pads the frame onto its well's registered canvas.
+    Results are cached on disk and the browser is told to cache them."""
+    path = _safe_image_path(key)
+    if path.suffix.lower() in _BROWSER_NATIVE and not thumb and not aligned:
+        return FileResponse(path)
+
+    try:
+        mtime_ns = path.stat().st_mtime_ns
+    except OSError:
+        raise HTTPException(status_code=404, detail=f"no such image: {key}")
+    tag = hashlib.sha1(f"{key}|{thumb}|{aligned}|{mtime_ns}".encode()).hexdigest()
+    cache_path = _IMG_CACHE_ROOT / f"{tag}.jpg"
+    if cache_path.is_file():
+        data = cache_path.read_bytes()
+    else:
+        data = _render_image_jpeg(key, thumb, aligned)
+        _IMG_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+        tmp = cache_path.with_suffix(".jpg.tmp")
+        tmp.write_bytes(data)
+        tmp.replace(cache_path)   # atomic publish
+    return Response(content=data, media_type="image/jpeg",
+                    headers={"Cache-Control": "public, max-age=86400",
+                             "ETag": f'"{tag}"'})
 
 
 @app.get("/api/well-align")
@@ -1141,6 +1165,9 @@ async def bundle_import(request: Request) -> dict:
         raise HTTPException(status_code=400, detail=f"bad tar: {e}")
     # Reset in-memory caches so the just-restored disk state is picked up.
     _align_cache.clear()
+    # Imported results may change alignment → drop the rendered-image cache.
+    import shutil
+    shutil.rmtree(_IMG_CACHE_ROOT, ignore_errors=True)
     return {"ok": True, "manifest": manifest,
             "updated_experiments": sorted(updated)}
 

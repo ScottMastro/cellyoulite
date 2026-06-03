@@ -7,6 +7,20 @@ import * as grid from "./grid.js";
 import * as growth from "./growth.js";
 import * as boxplot from "./boxplot.js";
 
+// Longest-side cap for the playback viewer. The base image is displayed at
+// the canvas height (CSS), so a shrunk JPEG looks identical but loads far
+// faster; vector overlays stay crisp regardless.
+const VIEWER_PX = 1100;
+
+// Kick off background loads of every frame at the viewer size so the first
+// playback is smooth (warms both the browser cache and the server disk cache).
+function prewarmFrames(well, aligned) {
+  for (const tp of well.timepoints) {
+    const im = new Image();
+    im.src = imgUrl(tp.key, VIEWER_PX, aligned);
+  }
+}
+
 export async function openWell(mountId, folderName) {
   stopPlay();
   document.querySelectorAll(".thumb.selected").forEach(e => e.classList.remove("selected"));
@@ -63,6 +77,7 @@ export async function openWell(mountId, folderName) {
   boxplot.refreshBoxplot();
   renderFilmstrip();
   showFrame(0);
+  prewarmFrames(data, alignFlag());
   $("well-card").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
@@ -120,7 +135,7 @@ async function showFrame(i) {
   }
 
   const a = alignFlag();
-  const nextSrc = imgUrl(tp.key, 0, a);
+  const nextSrc = imgUrl(tp.key, VIEWER_PX, a);
   const nextEdges = edgesUrl(tp.key, a);
   const pre = new Image();
   pre.onload = () => {
