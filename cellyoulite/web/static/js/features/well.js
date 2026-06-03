@@ -34,8 +34,6 @@ export async function openWell(mountId, folderName) {
   const data = await r.json();
   if (!r.ok) { setStatus("err", data.detail || r.statusText); return; }
   state.well = data;
-  $("well-title").innerHTML = `${data.treatment} · r${data.replicate} <span id="well-cp-status" class="cp-status-inline"></span>`;
-  updateWellCpStatus();
 
   const scrub = $("scrub");
   scrub.min = 0; scrub.max = data.timepoints.length - 1; scrub.value = 0;
@@ -82,21 +80,6 @@ export async function openWell(mountId, folderName) {
   $("well-card").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
-export function updateWellCpStatus() {
-  const el = $("well-cp-status");
-  if (!el || !state.well) return;
-  const st = state.cellposeStatus.get(state.well.folder_name);
-  if (!st) { el.textContent = ""; return; }
-  const tracked = state.trackDoneByWell.get(state.well.folder_name) === true;
-  let cls;
-  if (st.n_done === 0) cls = "todo";
-  else if (st.n_done < st.n_total || !tracked) cls = "partial";
-  else cls = "done";
-  el.className = `cp-status-inline ${cls}`;
-  el.textContent = `seg ${st.n_done}/${st.n_total}`
-                 + (tracked ? " · tracked" : " · untracked");
-}
-
 export function renderFilmstrip() {
   if (!state.well) return;
   const a = alignFlag();
@@ -124,7 +107,8 @@ async function showFrame(i) {
   const tp = tps[i];
   $("scrub").value = i;
   $("scrub-label").textContent = `${i + 1} / ${tps.length}`;
-  $("well-frame-label").textContent = `t${i} · ${tp.label}`;
+  $("well-frame-label").textContent =
+    `${state.well.treatment} · r${state.well.replicate} · t${i} · ${tp.label}`;
 
   document.querySelectorAll("#filmstrip .frame.active").forEach(e => e.classList.remove("active"));
   const frameEl = document.querySelector(`#filmstrip .frame[data-i="${i}"]`);

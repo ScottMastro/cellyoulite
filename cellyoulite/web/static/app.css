@@ -290,7 +290,6 @@ footer a { color: var(--accent); text-decoration: none; }
   flex-direction: column;
 }
 .viewer-pane[hidden] { display: none; }   /* author display:flex beats [hidden] otherwise */
-.viewer-pane h2 { margin-top: 0; }
 
 /* The chooser scrolls within a bounded height so the viewer stays put. */
 #thumb-grid {
@@ -299,20 +298,25 @@ footer a { color: var(--accent); text-decoration: none; }
   background: var(--panel-2);
   border: 1px solid var(--rule);
   border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px;
 }
 .exp-row {
   display: flex;
-  align-items: center;
-  gap: 10px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
   padding: 8px 10px;
-  border-bottom: 1px solid var(--rule);
+  background: var(--bg);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
 }
-.exp-row:last-child { border-bottom: none; }
 .exp-row-label {
-  flex: 0 0 92px;
-  text-align: right;
-  font: 500 12px var(--mono);
-  color: var(--ink-soft);
+  text-align: left;
+  font: 600 13px var(--mono);
+  color: var(--ink);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -500,17 +504,6 @@ button.redo:hover {
 #cp-last-line { font-size: 11px; opacity: 0.7; min-height: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* Inline cellpose-status pill in the well title. */
-.cp-status-inline {
-  display: inline-block;
-  font: 500 11px var(--mono);
-  padding: 2px 7px; margin-left: 8px;
-  border-radius: 4px; vertical-align: middle;
-  border: 1px solid #0006;
-}
-.cp-status-inline.done    { background: #20c97a; color: #08230f; }
-.cp-status-inline.partial { background: #f0b748; color: #2a1d00; }
-.cp-status-inline.todo    { background: #555;    color: #ddd; }
-.cp-status-inline:empty { display: none; }
 
 /* ---------- viewer ---------- */
 
@@ -558,7 +551,7 @@ button.ghost:hover { border-color: var(--err); color: var(--err); }
   background: #05080c;
   display: flex; align-items: center; justify-content: center;
   padding: 1rem;
-  height: 50vh;
+  height: 65vh;
   min-height: 360px;
 }
 
@@ -570,9 +563,8 @@ button.ghost:hover { border-color: var(--err); color: var(--err); }
   background: #05080c;
   padding: .6rem 1rem; overflow: auto;
 }
-.viewer-pane.fs h2 { margin: 0 0 .4rem; }
 .viewer-pane.fs #well-close { display: none; }  /* the ✕ exits fullscreen; avoid two close-alikes */
-.viewer-pane.fs .viewer { display: flex; flex-direction: column; height: calc(100vh - 2.2rem); }
+.viewer-pane.fs .viewer { display: flex; flex-direction: column; height: calc(100vh - 1.2rem); }
 .viewer-pane.fs .viewer-canvas { flex: 1 1 auto; height: auto; min-height: 0; }
 .image-stack {
   position: relative;
@@ -696,8 +688,8 @@ button.ghost:hover { border-color: var(--err); color: var(--err); }
 }
 .filmstrip .frame {
   position: relative;
-  flex: 0 0 96px;
-  height: 96px;
+  flex: 0 0 84px;
+  height: 84px;
   background: #000;
   border: 2px solid #2a2f38;
   border-radius: 2px;
@@ -718,8 +710,8 @@ button.ghost:hover { border-color: var(--err); color: var(--err); }
 }
 .filmstrip .frame-tag {
   position: absolute; bottom: 2px; left: 3px;
-  font: 500 9px var(--mono); color: #e6e9ee;
-  background: #000a; padding: 1px 4px; border-radius: 3px;
+  font: 600 13px var(--mono); color: #fff;
+  background: #000b; padding: 1px 5px; border-radius: 3px;
   pointer-events: none;
 }
 
