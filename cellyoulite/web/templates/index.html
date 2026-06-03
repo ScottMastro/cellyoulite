@@ -63,64 +63,42 @@
   <div class="version" id="status"><span class="dot ok"></span>ready</div>
 </header>
 
+<!-- Subset image-download picker (experiments grouped by treatment). -->
+<div id="dl-modal" class="dl-modal hidden">
+  <div class="dl-card">
+    <div class="dl-head">
+      <h3>Download images</h3>
+      <button id="dl-close" class="ghost">✕</button>
+    </div>
+    <div class="dl-controls">
+      <label class="dl-all"><input type="checkbox" id="dl-select-all"> Select all</label>
+      <span id="dl-count" class="hint"></span>
+    </div>
+    <div id="dl-list" class="dl-list"></div>
+    <div class="dl-actions">
+      <button id="dl-go" class="primary">Download selected</button>
+    </div>
+  </div>
+</div>
+
 <main>
 
   <section class="card">
-    <h2>Data folder</h2>
-    <div class="data-row">
-      <span id="data-path" class="mono small">—</span>
-      <button id="refresh" class="ghost">Refresh</button>
-      <button id="reveal" class="ghost">Open in Files</button>
-      <button id="bundle-export" class="ghost" title="package processed results as .tar.gz">Export bundle</button>
-      <label class="ghost" id="bundle-import-label" title="restore a bundle">
-        Import bundle<input type="file" id="bundle-import" accept=".gz,.tgz,.tar.gz" hidden>
+    <h2>Data</h2>
+    <div class="data-actions">
+      <label class="filebtn primary" title="upload raw images (pick the folder of experiments)">
+        Add image data
+        <input type="file" id="add-images" webkitdirectory directory multiple hidden>
       </label>
-      <span id="bundle-status" class="hint"></span>
+      <label class="filebtn" title="upload an analysis results bundle (.tar.gz)">
+        Add segmentation data
+        <input type="file" id="add-seg" accept=".gz,.tgz,.tar.gz" hidden>
+      </label>
+      <button id="download-images" class="ghost" title="download raw images for chosen experiments">Download images…</button>
+      <span id="data-status" class="hint"></span>
     </div>
-    <p class="hint">Each experiment is a subfolder named <code>&lt;treatment&gt; r&lt;replicate&gt;</code>. Add or edit folders, then hit Refresh.</p>
+    <p class="hint">Experiments are figured out by name (<code>&lt;treatment&gt; r&lt;replicate&gt;</code>) — analysis runs offline via <code>cellyoulite-analyze</code>; upload the results here.</p>
     <div class="pills" id="grid-pills" hidden></div>
-
-    <div class="job-bar" id="align-bar">
-      <div class="job-bar-head">
-        <span class="job-bar-label">1. Alignment</span>
-        <button id="al-run"    class="primary">Run alignment</button>
-        <button id="al-redo"   class="redo" hidden title="Re-run from scratch">↻</button>
-        <button id="al-cancel" class="ghost" hidden>Cancel</button>
-        <span id="al-summary" class="hint">—</span>
-      </div>
-      <div class="progress" id="al-progress" hidden>
-        <div class="progress-fill" id="al-progress-fill"></div>
-      </div>
-      <div id="al-last-line" class="mono small hint"></div>
-    </div>
-
-    <div class="job-bar" id="cellpose-bar">
-      <div class="job-bar-head">
-        <span class="job-bar-label">2. Segmentation (Cellpose-SAM)</span>
-        <button id="cp-run"    class="primary">Run segmentation</button>
-        <button id="cp-redo"   class="redo" hidden title="Re-run from scratch">↻</button>
-        <button id="cp-cancel" class="ghost" hidden>Cancel</button>
-        <span id="cp-summary" class="hint">—</span>
-      </div>
-      <div class="progress" id="cp-progress" hidden>
-        <div class="progress-fill" id="cp-progress-fill"></div>
-      </div>
-      <div id="cp-last-line" class="mono small hint"></div>
-    </div>
-
-    <div class="job-bar" id="track-bar">
-      <div class="job-bar-head">
-        <span class="job-bar-label">3. Tracking (link across time)</span>
-        <button id="tr-run"    class="primary">Run tracking</button>
-        <button id="tr-redo"   class="redo" hidden title="Re-run from scratch">↻</button>
-        <button id="tr-cancel" class="ghost" hidden>Cancel</button>
-        <span id="tr-summary" class="hint">—</span>
-      </div>
-      <div class="progress" id="tr-progress" hidden>
-        <div class="progress-fill" id="tr-progress-fill"></div>
-      </div>
-      <div id="tr-last-line" class="mono small hint"></div>
-    </div>
   </section>
 
   <section class="card" id="grid-card" hidden>
@@ -275,14 +253,9 @@
     return `/api/cellpose-edges?key=${encodeURIComponent(key)}&aligned=${aligned}&v=${overlayVersion}`;
   };
 
-  // ---------------- data folder ----------------
+  // ---------------- data ----------------
 
   async function refreshAll() {
-    try {
-      const r = await fetch("/api/data-dir");
-      const data = await r.json();
-      $("data-path").textContent = data.path;
-    } catch (e) {}
     // Pull cellpose AND track status BEFORE rendering the grid so the
     // first paint of the well thumbnails already knows which wells are
     // tracked (otherwise every pill is amber until the next poll tick).
@@ -315,22 +288,10 @@
     } catch (e) { return false; }
   }
 
-  // Combined poll: alignment + cellpose status + both job states.
-  // 2s while anything is running; 5s when idle.
-  let pollMs = 5000;
-  let alignStatus = { n_done: 0, n_total: 0 };
   let trackStatus = { n_done: 0, n_total: 0 };
   let trackDoneByWell = new Map();   // folder_name -> bool
   let humanValidatedByWell = new Map();   // folder_name -> bool
 
-  async function refreshAlignStatus() {
-    try {
-      const r = await fetch("/api/align-status");
-      if (!r.ok) return;
-      const data = await r.json();
-      alignStatus = { n_done: data.n_done || 0, n_total: data.n_total || 0 };
-    } catch (e) {}
-  }
   async function refreshTrackStatus() {
     try {
       const r = await fetch("/api/track-status");
@@ -355,263 +316,112 @@
     } catch (e) { return false; }
   }
 
+  // Analysis is offshored, so there are no running jobs to poll — just keep
+  // the grid/viewer in sync with whatever results are on disk (uploads etc.).
   async function combinedPoll() {
-    const [_, trackChanged] = await Promise.all([
-      refreshAlignStatus(), refreshTrackStatus(),
-    ]);
+    const trackChanged = await refreshTrackStatus();
     const cpChanged = await refreshCellposeStatus();
     if (cpChanged || trackChanged) {
       if (currentGrid) renderThumbGrid(currentGrid);
       if (currentWell) { renderFilmstrip(); updateWellCpStatus(); }
     }
-    let anyRunning = false;
-    try {
-      const [aj, cj, tj] = await Promise.all([
-        fetch("/api/align-job").then(r => r.ok ? r.json() : null),
-        fetch("/api/cellpose-job").then(r => r.ok ? r.json() : null),
-        fetch("/api/track-job").then(r => r.ok ? r.json() : null),
-      ]);
-      if (aj) { updateAlignBar(aj); anyRunning = anyRunning || aj.running; }
-      if (cj) { updateCellposeBar(cj); anyRunning = anyRunning || cj.running; }
-      if (tj) { updateTrackBar(tj); anyRunning = anyRunning || tj.running; }
-    } catch (e) {}
-    pollMs = anyRunning ? 2000 : 5000;
-    setTimeout(combinedPoll, pollMs);
+    setTimeout(combinedPoll, 5000);
   }
   setTimeout(combinedPoll, 1500);
 
-  function fmtPct(nDone, nTotal) {
-    return nTotal ? Math.round(100 * nDone / nTotal) : 0;
-  }
   function escapeHtml(s) {
     return s.replace(/[&<>"']/g, c => (
       {"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]
     ));
   }
-  // Reformat a "[ N/ M] subject   tail" log line into styled spans.
-  function formatLastLine(line) {
-    if (!line) return "";
-    const m = line.match(/^\s*\[\s*(\d+)\s*\/\s*(\d+)\s*\]\s*(.*)$/);
-    if (!m) return escapeHtml(line);
-    const i = parseInt(m[1]), total = parseInt(m[2]);
-    const rest = m[3];
-    // Split trailing "<ms>ms" or "cache" tag from the subject if present.
-    const tailMatch = rest.match(/^(.*?)\s{2,}(cache|\d+ms)\s*$/);
-    const subject = tailMatch ? tailMatch[1] : rest;
-    const tail = tailMatch ? tailMatch[2] : "";
-    return `<span class="log-counter">${i}/${total}</span>`
-         + `<span class="log-subject">${escapeHtml(subject)}</span>`
-         + (tail
-              ? `<span class="log-tail log-${tail === "cache" ? "cache" : "ms"}">${escapeHtml(tail)}</span>`
-              : "");
-  }
-  function etaFromJob(job) {
-    if (!job.started_at || !job.running) return "";
-    const elapsed = Math.max(1, Date.now() / 1000 - job.started_at);
-    const m = (job.last_line || "").match(/\[\s*(\d+)\/\s*(\d+)\]/);
-    if (!m) return "starting…";
-    const i = parseInt(m[1]), total = parseInt(m[2]);
-    if (i <= 0 || total <= 0) return "";
-    const remaining = Math.round((elapsed / i) * (total - i));
-    const mm = String(Math.floor(remaining / 60)).padStart(2, "0");
-    const ss = String(remaining % 60).padStart(2, "0");
-    return `ETA ${mm}:${ss}`;
-  }
 
-  function updateAlignBar(job) {
-    const { n_done, n_total } = alignStatus;
-    const pct = fmtPct(n_done, n_total);
-    $("al-progress").hidden = n_total === 0;
-    $("al-progress-fill").style.width = `${pct}%`;
-    $("al-progress-fill").classList.toggle("running", job.running);
-    const runBtn = $("al-run"), cancelBtn = $("al-cancel"), redoBtn = $("al-redo");
-    const allDone = n_total > 0 && n_done >= n_total;
-    if (job.running) {
-      runBtn.disabled = true; runBtn.textContent = "Running…";
-      runBtn.classList.remove("done");
-      cancelBtn.hidden = false; redoBtn.hidden = true;
-    } else if (allDone) {
-      runBtn.disabled = true;
-      runBtn.textContent = "Aligned ✓";
-      runBtn.classList.add("done");
-      cancelBtn.hidden = true; redoBtn.hidden = false;
-    } else {
-      runBtn.disabled = false;
-      runBtn.textContent = "Run alignment";
-      runBtn.classList.remove("done");
-      cancelBtn.hidden = true; redoBtn.hidden = true;
-    }
-    $("al-summary").innerHTML =
-      `<strong>${n_done}/${n_total}</strong> wells aligned (${pct}%)`
-      + (job.running ? ` · running · ${etaFromJob(job)}` : "");
-    $("al-last-line").innerHTML = job.running ? formatLastLine(job.last_line) : "";
-  }
+  // ---------------- add / download data ----------------
 
-  function updateCellposeBar(job) {
-    let nDone = 0, nTotal = 0;
-    for (const st of cellposeStatus.values()) { nDone += st.n_done; nTotal += st.n_total; }
-    const pct = fmtPct(nDone, nTotal);
-    $("cp-progress").hidden = nTotal === 0;
-    $("cp-progress-fill").style.width = `${pct}%`;
-    $("cp-progress-fill").classList.toggle("running", job.running);
-    const runBtn = $("cp-run"), cancelBtn = $("cp-cancel"), redoBtn = $("cp-redo");
-    const allDone = nTotal > 0 && nDone >= nTotal;
-    if (job.running) {
-      runBtn.disabled = true; runBtn.textContent = "Running…";
-      runBtn.classList.remove("done");
-      cancelBtn.hidden = false; redoBtn.hidden = true;
-    } else if (allDone) {
-      runBtn.disabled = true; runBtn.textContent = "Segmented ✓";
-      runBtn.classList.add("done");
-      cancelBtn.hidden = true; redoBtn.hidden = false;
-    } else {
-      runBtn.disabled = false; runBtn.textContent = "Run segmentation";
-      runBtn.classList.remove("done");
-      cancelBtn.hidden = true; redoBtn.hidden = true;
-    }
-    $("cp-summary").innerHTML =
-      `<strong>${nDone}/${nTotal}</strong> frames segmented (${pct}%)`
-      + (job.running ? ` · running · ${etaFromJob(job)}` : "");
-    $("cp-last-line").innerHTML = job.running ? formatLastLine(job.last_line) : "";
-  }
-
-  function updateTrackBar(job) {
-    const { n_done, n_total } = trackStatus;
-    const pct = fmtPct(n_done, n_total);
-    $("tr-progress").hidden = n_total === 0;
-    $("tr-progress-fill").style.width = `${pct}%`;
-    $("tr-progress-fill").classList.toggle("running", job.running);
-    const runBtn = $("tr-run"), cancelBtn = $("tr-cancel"), redoBtn = $("tr-redo");
-    const allDone = n_total > 0 && n_done >= n_total;
-    if (job.running) {
-      runBtn.disabled = true; runBtn.textContent = "Running…";
-      runBtn.classList.remove("done");
-      cancelBtn.hidden = false; redoBtn.hidden = true;
-    } else if (allDone) {
-      runBtn.disabled = true; runBtn.textContent = "Tracked ✓";
-      runBtn.classList.add("done");
-      cancelBtn.hidden = true; redoBtn.hidden = false;
-    } else {
-      runBtn.disabled = false; runBtn.textContent = "Run tracking";
-      runBtn.classList.remove("done");
-      cancelBtn.hidden = true; redoBtn.hidden = true;
-    }
-    $("tr-summary").innerHTML =
-      `<strong>${n_done}/${n_total}</strong> wells tracked (${pct}%)`
-      + (job.running ? ` · running · ${etaFromJob(job)}` : "");
-    $("tr-last-line").innerHTML = job.running ? formatLastLine(job.last_line) : "";
-  }
-
-  $("tr-run").onclick = async () => {
-    $("tr-run").disabled = true;
+  $("add-images").onchange = async (e) => {
+    const files = [...e.target.files];
+    e.target.value = "";
+    if (!files.length) return;
+    const st = $("data-status");
+    const imgs = files.filter(f => /\.(tif|tiff|png|jpe?g|bmp)$/i.test(f.name));
+    if (!imgs.length) { st.textContent = "no image files in that folder"; return; }
+    st.textContent = `uploading ${imgs.length} image(s)…`;
+    const fd = new FormData();
+    // 3rd arg keeps the relative path so the server can route by experiment name.
+    for (const f of imgs) fd.append("files", f, f.webkitRelativePath || f.name);
     try {
-      const r = await fetch("/api/track-run", { method: "POST" });
-      if (!r.ok) setStatus("err", `track-run: ${r.statusText}`);
-    } catch (e) { setStatus("err", String(e)); }
-  };
-  $("tr-redo").onclick = async () => {
-    if (!confirm("Re-link tracks for every well? This rebuilds the JSON files and regenerates the cached per-track strips — a couple of minutes total.")) return;
-    try {
-      const r = await fetch("/api/track-run", { method: "POST" });
-      if (!r.ok) setStatus("err", `track-run: ${r.statusText}`);
-    } catch (e) { setStatus("err", String(e)); }
-  };
-  $("tr-cancel").onclick = async () => {
-    $("tr-cancel").disabled = true;
-    try { await fetch("/api/track-cancel", { method: "POST" }); }
-    finally { $("tr-cancel").disabled = false; }
+      const r = await fetch("/api/upload-images", { method: "POST", body: fd });
+      const d = await r.json();
+      if (!r.ok) { st.textContent = `error: ${d.detail || r.statusText}`; return; }
+      st.textContent = `added ${d.n_files} image(s) to ${d.n_experiments} experiment(s)`
+        + (d.skipped ? ` · skipped ${d.skipped}` : "");
+      await refreshAll();
+    } catch (err) { st.textContent = `error: ${err}`; }
   };
 
-  $("al-run").onclick = async () => {
-    $("al-run").disabled = true;
-    try {
-      const r = await fetch("/api/align-run", { method: "POST" });
-      if (!r.ok) setStatus("err", `align-run: ${r.statusText}`);
-    } catch (e) { setStatus("err", String(e)); }
-  };
-  $("al-redo").onclick = async () => {
-    if (!confirm("Re-align every well from scratch? Each well takes 10–30s to recompute, so the whole dataset is a few minutes of work.")) return;
-    try {
-      const r = await fetch("/api/align-run?force=1", { method: "POST" });
-      if (!r.ok) setStatus("err", `align-run: ${r.statusText}`);
-    } catch (e) { setStatus("err", String(e)); }
-  };
-  $("al-cancel").onclick = async () => {
-    $("al-cancel").disabled = true;
-    try { await fetch("/api/align-cancel", { method: "POST" }); }
-    finally { $("al-cancel").disabled = false; }
-  };
-  $("cp-run").onclick = async () => {
-    $("cp-run").disabled = true;
-    try {
-      const r = await fetch("/api/cellpose-run", { method: "POST" });
-      if (!r.ok) setStatus("err", `cellpose-run: ${r.statusText}`);
-    } catch (e) { setStatus("err", String(e)); }
-  };
-  $("cp-redo").onclick = async () => {
-    if (!confirm("Re-segment EVERY frame with Cellpose-SAM? This is expensive — ~5–6s per frame on GPU, ~36 min for the full dataset. Existing masks will be overwritten.")) return;
-    try {
-      const r = await fetch("/api/cellpose-run?force=1", { method: "POST" });
-      if (!r.ok) setStatus("err", `cellpose-run: ${r.statusText}`);
-    } catch (e) { setStatus("err", String(e)); }
-  };
-  $("cp-cancel").onclick = async () => {
-    $("cp-cancel").disabled = true;
-    try { await fetch("/api/cellpose-cancel", { method: "POST" }); }
-    finally { $("cp-cancel").disabled = false; }
-  };
-
-  $("refresh").onclick = () => refreshAll();
-
-  $("bundle-export").onclick = async () => {
-    const btn = $("bundle-export"), st = $("bundle-status");
-    btn.disabled = true; st.textContent = "packaging…";
-    try {
-      const r = await fetch("/api/bundle-export");
-      if (!r.ok) { st.textContent = `error: ${r.statusText}`; return; }
-      const blob = await r.blob();
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = `cellyoulite_${new Date().toISOString().slice(0,19).replace(/[-:T]/g,'')}.tar.gz`;
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(a.href), 60000);
-      st.textContent = `downloaded ${Math.round(blob.size/1024/1024)} MB`;
-    } catch (e) { st.textContent = `error: ${e}`; }
-    finally { btn.disabled = false; }
-  };
-
-  $("bundle-import").onchange = async (e) => {
+  $("add-seg").onchange = async (e) => {
     const file = e.target.files[0];
+    e.target.value = "";
     if (!file) return;
-    const st = $("bundle-status");
-    if (!confirm(`Restore "${file.name}" into the current working directory? Existing files in .align_cache, .cellpose_cache, tracks, and annotations will be overwritten.`)) {
-      e.target.value = ""; return;
-    }
-    st.textContent = "uploading…";
+    const st = $("data-status");
+    st.textContent = `importing ${file.name}…`;
     try {
       const r = await fetch("/api/bundle-import", {
         method: "POST",
         headers: { "Content-Type": "application/gzip" },
         body: file,
       });
-      if (!r.ok) { st.textContent = `error: ${r.statusText}`; return; }
-      const data = await r.json();
-      const counts = (data.manifest?.contents || []).map(c => `${c.name}: ${c.files} files`).join(" · ");
-      st.textContent = `restored — ${counts}`;
-      // Refresh everything to pick up the just-extracted state.
+      const d = await r.json();
+      if (!r.ok) { st.textContent = `error: ${d.detail || r.statusText}`; return; }
+      const ex = d.updated_experiments || [];
+      st.textContent = ex.length
+        ? `merged results for ${ex.length} experiment(s): ${ex.join(", ")}`
+        : "imported (no experiments detected in bundle)";
       await refreshAll();
-    } catch (e) { st.textContent = `error: ${e}`; }
-    finally { e.target.value = ""; }
+    } catch (err) { st.textContent = `error: ${err}`; }
   };
 
-  $("reveal").onclick = async () => {
-    try {
-      const r = await fetch("/api/reveal", { method: "POST" });
-      if (!r.ok) {
-        const data = await r.json();
-        setStatus("err", data.detail || r.statusText);
-      }
-    } catch (e) { setStatus("err", String(e)); }
+  // subset image-download picker (experiments grouped by treatment)
+  function updateDlCount() {
+    const n = $("dl-list").querySelectorAll(".dl-item input:checked").length;
+    $("dl-count").textContent = `${n} selected`;
+  }
+  function openDownloadModal() {
+    const wells = (currentGrid && currentGrid.wells) || [];
+    if (!wells.length) { $("data-status").textContent = "no experiments to download yet"; return; }
+    const byTreat = {};
+    for (const w of wells) (byTreat[w.treatment] ||= []).push(w.folder_name);
+    $("dl-list").innerHTML = Object.keys(byTreat).sort().map(tr => {
+      const items = byTreat[tr].sort().map(fn =>
+        `<label class="dl-item"><input type="checkbox" value="${escapeHtml(fn)}"> ${escapeHtml(fn)}</label>`
+      ).join("");
+      return `<div class="dl-group">`
+           + `<label class="dl-group-head"><input type="checkbox" class="dl-group-all"> <strong>${escapeHtml(tr)}</strong></label>`
+           + `${items}</div>`;
+    }).join("");
+    $("dl-select-all").checked = false;
+    $("dl-list").querySelectorAll(".dl-item input").forEach(c =>
+      c.addEventListener("change", updateDlCount));
+    $("dl-list").querySelectorAll(".dl-group-all").forEach(g =>
+      g.addEventListener("change", (e) => {
+        e.target.closest(".dl-group").querySelectorAll(".dl-item input")
+          .forEach(c => c.checked = e.target.checked);
+        updateDlCount();
+      }));
+    updateDlCount();
+    $("dl-modal").classList.remove("hidden");
+  }
+  $("download-images").onclick = openDownloadModal;
+  $("dl-close").onclick = () => $("dl-modal").classList.add("hidden");
+  $("dl-select-all").onchange = (e) => {
+    $("dl-list").querySelectorAll("input[type=checkbox]").forEach(c => c.checked = e.target.checked);
+    updateDlCount();
+  };
+  $("dl-go").onclick = () => {
+    const chosen = [...$("dl-list").querySelectorAll(".dl-item input:checked")].map(c => c.value);
+    if (!chosen.length) { $("dl-count").textContent = "select at least one"; return; }
+    const params = chosen.map(x => `exp=${encodeURIComponent(x)}`).join("&");
+    window.location.href = `/api/download-images?${params}`;
+    $("dl-modal").classList.add("hidden");
   };
 
   // ---------------- grid ----------------
