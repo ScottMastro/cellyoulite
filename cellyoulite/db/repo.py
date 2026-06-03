@@ -82,6 +82,20 @@ def set_tracks(folder_name: str, tracks_data: dict, source_fingerprint=None,
         conn.close()
 
 
+def get_alignment(folder_name: str) -> dict | None:
+    """The alignment row for a well (fingerprint, cache_version, canvas, and
+    JSON offsets/placements), or None."""
+    conn = connect()
+    try:
+        r = conn.execute(
+            "SELECT a.fingerprint, a.cache_version, a.canvas_h, a.canvas_w, "
+            "a.offsets, a.placements FROM alignment a JOIN well w ON w.id=a.well_id "
+            "WHERE w.folder_name=?", (folder_name,)).fetchone()
+        return dict(r) if r else None
+    finally:
+        conn.close()
+
+
 def get_tracks(folder_name: str) -> dict | None:
     """Reconstruct the tracks payload (matching the JSON shape) from the DB,
     or None if the well has no tracks. Includes per-track `starred`."""

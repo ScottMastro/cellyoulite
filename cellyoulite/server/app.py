@@ -130,10 +130,32 @@ _align_cache: dict[tuple[str, str], WellAlignment] = {}
 
 
 def _well_alignment(mount: dict, well) -> WellAlignment:
+    """Resolve a well's alignment, read-through the DB:
+      in-memory cache → DB row (matching fingerprint+version) → compute.
+    A compute (which uses the JSON disk cache when present) is persisted back
+    to the DB so the ingested rows are the source of truth going forward.
+    align.py stays DB-free, so the offline analysis tool is unaffected."""
     cache_key = (mount["id"], well.folder_name)
-    if cache_key not in _align_cache:
-        _align_cache[cache_key] = compute_alignment_cached([tp.path for tp in well.timepoints])
-    return _align_cache[cache_key]
+    if cache_key in _align_cache:
+        return _align_cache[cache_key]
+    paths = [tp.path for tp in well.timepoints]
+    fp = _fingerprint(paths)
+    row = repo.get_alignment(well.folder_name)
+    if row and row["fingerprint"] == fp and row["cache_version"] == _CACHE_VERSION:
+        align = WellAlignment(
+            offsets=tuple(tuple(o) for o in json.loads(row["offsets"])),
+            placements=tuple(tuple(p) for p in json.loads(row["placements"])),
+            canvas_shape=(row["canvas_h"], row["canvas_w"]),
+        )
+    else:
+        align = compute_alignment_cached(paths)
+        repo.set_alignment(
+            well.folder_name, fp, _CACHE_VERSION,
+            align.canvas_shape[0], align.canvas_shape[1],
+            [list(o) for o in align.offsets], [list(p) for p in align.placements],
+            treatment=well.treatment, replicate=well.replicate)
+    _align_cache[cache_key] = align
+    return align
 
 
 def _read_aligned(key: str) -> np.ndarray:
