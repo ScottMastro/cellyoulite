@@ -14,6 +14,7 @@ dependencies = [
     "python-multipart>=0.0.9",
     "numpy>=1.24",
     "scikit-image>=0.22",
+    "imagecodecs>=2024.1.1",   # decode LZW/compressed TIFFs via tifffile
     "opencv-python-headless>=4.9",
     "pandas>=2.0",
     "matplotlib>=3.8",
