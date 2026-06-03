@@ -10,8 +10,9 @@
 </head>
 <body>
 
-<!-- Password-less profile gate: shown on every load until a user is chosen. -->
-<div id="user-gate" class="user-gate">
+<!-- Password-less profile gate: shown until a user is chosen; pre-hidden
+     server-side when a user cookie is already present. -->
+<div id="user-gate" class="user-gate{% if has_user %} hidden{% endif %}">
   <div class="user-gate-card">
     <div class="user-gate-brand">
       <svg width="34" height="34" viewBox="0 0 32 32" aria-hidden="true">
@@ -1660,8 +1661,25 @@
   })();
 
   // ---------------- user accounts (password-less profiles) ----------------
+  // Persisted in a cookie (not localStorage) so the server can read it too,
+  // and so a returning visitor is taken straight in.
   const USER_KEY = "cyl_user";
+  const USER_TTL = 60 * 60 * 24 * 365;   // 1 year, in seconds
   let currentUser = null;
+
+  function getCookie(name) {
+    const esc = name.replace(/([.$?*|{}()\[\]\\\/+^])/g, "\\$1");
+    const m = document.cookie.match(new RegExp("(?:^|; )" + esc + "=([^;]*)"));
+    return m ? decodeURIComponent(m[1]) : null;
+  }
+  function setCookie(name, value, maxAge) {
+    const secure = location.protocol === "https:" ? "; Secure" : "";
+    document.cookie =
+      `${name}=${encodeURIComponent(value)}; path=/; max-age=${maxAge}; SameSite=Lax${secure}`;
+  }
+  function deleteCookie(name) {
+    document.cookie = `${name}=; path=/; max-age=0; SameSite=Lax`;
+  }
 
   function showUserChip() {
     const chip = $("userchip");
@@ -1685,7 +1703,7 @@
 
   function renderUserList(users) {
     const list = $("user-list");
-    const last = localStorage.getItem(USER_KEY);
+    const last = getCookie(USER_KEY);
     const cards = users.map(u =>
       `<button class="user-card${u === last ? " last" : ""}" data-user="${escapeHtml(u)}">
          <span class="user-avatar">${escapeHtml(u.slice(0, 1).toUpperCase())}</span>
@@ -1718,7 +1736,7 @@
 
   function selectUser(name) {
     currentUser = name;
-    localStorage.setItem(USER_KEY, name);
+    setCookie(USER_KEY, name, USER_TTL);
     $("user-gate").classList.add("hidden");
     showUserChip();
     refreshAll();
@@ -1752,12 +1770,24 @@
   $("user-new-name").addEventListener("keydown", e => { if (e.key === "Enter") createUser(); });
   $("user-switch").addEventListener("click", () => {
     currentUser = null;
+    deleteCookie(USER_KEY);
     showUserChip();
     initUserGate();
   });
 
   // ---------------- boot ----------------
-  initUserGate();
+  (function () {
+    const saved = getCookie(USER_KEY);
+    if (saved) {
+      // Returning visitor — gate is already pre-hidden server-side.
+      currentUser = saved;
+      $("user-gate").classList.add("hidden");
+      showUserChip();
+      refreshAll();
+    } else {
+      initUserGate();
+    }
+  })();
 </script>
 </body>
 </html>

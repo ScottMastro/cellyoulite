@@ -137,7 +137,11 @@ def _prefixed_key(mount: dict, inner_key: str) -> str:
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request) -> HTMLResponse:
     resp = templates.TemplateResponse(
-        request, "index.html", {"version": __version__}
+        request, "index.html",
+        {"version": __version__,
+         # Pre-hide the profile gate server-side when a user cookie is
+         # already present, so returning visitors don't see it flash.
+         "has_user": bool(request.cookies.get("cyl_user"))},
     )
     resp.headers["Cache-Control"] = "no-store, must-revalidate"
     return resp

@@ -1015,3 +1015,9 @@ label.ghost:hover { border-color: var(--accent); color: var(--accent); }
   white-space: nowrap;
 }
 .userchip-switch { padding: 3px 8px; font-size: 12px; }
+
+/* The display rules above override the browser default [hidden]{display:none}
+   (author CSS beats the UA sheet), so make `hidden` win for these toggled
+   elements — otherwise the new-user box and chip never actually hide. */
+.user-new[hidden],
+.userchip[hidden] { display: none; }
