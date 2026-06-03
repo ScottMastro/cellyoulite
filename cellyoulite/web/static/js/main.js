@@ -10,6 +10,7 @@ import { initBoxplot } from "./features/boxplot.js";
 import { initGrowth } from "./features/growth.js";
 import { initWell } from "./features/well.js";
 import { initUsers, initUserGate, showUserChip, USER_KEY } from "./features/users.js";
+import { initTabs } from "./features/tabs.js";
 import { refreshAll, startPolling } from "./features/polling.js";
 
 initBranding();
@@ -18,6 +19,7 @@ initBoxplot();
 initGrowth();
 initWell();
 initUsers();
+initTabs();
 startPolling();
 
 // ---------------- boot ----------------

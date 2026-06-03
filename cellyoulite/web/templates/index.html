@@ -100,6 +100,13 @@
     <div class="pills" id="grid-pills" hidden></div>
   </section>
 
+  <div class="tabwrap">
+    <nav class="app-tabs">
+      <button class="app-tab active" data-panel="panel-curate">Curate</button>
+      <button class="app-tab" data-panel="panel-results">Results</button>
+    </nav>
+    <div class="tab-panel" id="panel-curate">
+
   <section class="card workspace" id="grid-card" hidden>
     <div class="chooser">
       <div id="thumb-grid"></div>
@@ -192,7 +199,9 @@
       <div id="growth-plot" class="growth-plot"></div>
     </div>
   </section>
+    </div><!-- /panel-curate -->
 
+    <div class="tab-panel" id="panel-results" hidden>
   <section class="card" id="boxplot-card" hidden>
     <h2>Growth distributions</h2>
     <div class="box-bar">
@@ -211,6 +220,8 @@
     </div>
     <div id="boxplot"></div>
   </section>
+    </div><!-- /panel-results -->
+  </div><!-- /tabwrap -->
 
 </main>
 
