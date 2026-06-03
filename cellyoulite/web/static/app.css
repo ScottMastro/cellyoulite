@@ -1041,6 +1041,14 @@ label.ghost:hover { border-color: var(--accent); color: var(--accent); }
   transition: all .12s ease;
 }
 .filebtn:hover { border-color: var(--accent); color: var(--accent); }
+/* the three data-card buttons share one size, sized to the longest label */
+.data-actions .filebtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 190px;
+  text-align: center;
+}
 .filebtn.primary {
   background: var(--accent); border-color: var(--accent); color: #0c1116;
   font-weight: 600;

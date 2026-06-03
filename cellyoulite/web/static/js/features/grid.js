@@ -20,9 +20,8 @@ export async function refreshGrid() {
     ]);
     renderThumbGrid(data);
     $("grid-card").hidden = data.n_wells === 0;
-    setStatus("ok", data.n_wells
-      ? `loaded ${data.n_wells} wells (${data.n_images} images)`
-      : "no wells");
+    // Counts are shown in the data card pills, so keep the header minimal.
+    setStatus("ok", data.n_wells ? "ready" : "no wells");
   } catch (e) {
     setStatus("err", String(e.message || e));
   }
