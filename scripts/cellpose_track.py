@@ -249,7 +249,7 @@ def main() -> None:
                 )
                 if not strips:
                     continue
-                for _v in ("raw", "seg", "diff", "shape"):
+                for _v in ("raw", "seg", "diff", "shape", "both"):
                     if _v in strips:
                         (stitch_dir / f"track_{tr['id']}_{_v}.png").write_bytes(strips[_v])
                 n_stitched += 1
