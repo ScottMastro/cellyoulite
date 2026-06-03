@@ -401,7 +401,7 @@ function refreshValidateButton() {
   } else {
     btn.textContent = "Validate well";
     btn.classList.add("primary"); btn.classList.remove("ghost");
-    statusEl.textContent = "review the tracks above, then validate";
+    statusEl.textContent = "";
   }
 }
 
@@ -512,36 +512,6 @@ export function initWell() {
       refreshValidateButton();
       if (state.grid) grid.renderThumbGrid(state.grid);
     } catch (e) { setStatus("err", String(e)); }
-  };
-
-  $("export-gif").onclick = async () => {
-    if (!state.well) return;
-    const btn = $("export-gif"), statusEl = $("export-gif-status");
-    btn.disabled = true;
-    btn.textContent = "Rendering…";
-    statusEl.textContent = "this may take 10–30s on large wells";
-    const qs = `mount_id=${encodeURIComponent(state.well.mount_id)}`
-             + `&folder_name=${encodeURIComponent(state.well.folder_name)}`;
-    try {
-      const r = await fetch(`/api/well-gif?${qs}`);
-      if (!r.ok) {
-        statusEl.textContent = `error: ${r.statusText}`;
-        return;
-      }
-      const blob = await r.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `${state.well.folder_name.replace(/\s+/g, "_")}_tracked.gif`;
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(url), 60000);
-      statusEl.textContent = `downloaded ${Math.round(blob.size / 1024)} KB`;
-    } catch (e) {
-      statusEl.textContent = `error: ${e}`;
-    } finally {
-      btn.disabled = false;
-      btn.textContent = "Export GIF (accepted organoids)";
-    }
   };
 
   $("play-btn").onclick = () => { state.playTimer ? stopPlay() : startPlay(); };
