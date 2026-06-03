@@ -29,13 +29,13 @@ export async function fetchGrowthPlot(qs) {
 }
 
 function render() {
-  const ctrls = $("growth-controls");
+  const box = $("growth-box");
   if (!_tracks.length) {
     $("growth-plot").innerHTML = "";
-    if (ctrls) ctrls.hidden = true;
+    if (box) box.hidden = true;
     return;
   }
-  if (ctrls) ctrls.hidden = false;
+  if (box) box.hidden = false;
   // Accepted always shown; rejected only when asked (drawn dotted).
   let vis = _tracks.filter(t => t.accepted || (opts.showRejected && !t.accepted));
   if (opts.starsOnly) vis = vis.filter(t => t.starred);
