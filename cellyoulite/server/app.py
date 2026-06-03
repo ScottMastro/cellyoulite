@@ -624,13 +624,14 @@ def track_stitch(mount_id: str, folder_name: str, track_id: int,
     """For one track, crop a square region around its centre in every frame
     where it appears and concatenate horizontally into a wide PNG.
     variant=raw → just the raw row; variant=seg → just the segmented row;
-    variant=both → two rows stacked (default). Cached versions from the
-    tracking script are served when available."""
-    if variant not in ("raw", "seg", "both"):
-        raise HTTPException(status_code=400, detail="variant must be raw/seg/both")
+    variant=diff → growth/loss vs the first-frame baseline (growth blue,
+    loss orange); variant=both → raw+seg+diff stacked (default). Cached
+    versions from the tracking script are served when available."""
+    if variant not in ("raw", "seg", "diff", "both"):
+        raise HTTPException(status_code=400, detail="variant must be raw/seg/diff/both")
     safe = folder_name.replace("/", "_")
     cached = _TRACKS_ROOT / safe / f"track_{track_id}_{variant}.png"
-    if cached.is_file() and variant in ("raw", "seg"):
+    if cached.is_file() and variant in ("raw", "seg", "diff"):
         return FileResponse(cached, media_type="image/png")
 
     _, well = _find_well(mount_id, folder_name)
