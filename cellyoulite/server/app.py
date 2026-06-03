@@ -24,6 +24,7 @@ from cellyoulite.io.grid import (
 )
 from cellyoulite.pipeline.align import (
     WellAlignment, compute_alignment_cached, is_alignment_cached, paste_onto_canvas,
+    _CACHE_VERSION, _fingerprint,
 )
 
 _WEB = Path(__file__).resolve().parent.parent / "web"
@@ -599,8 +600,13 @@ def set_track_validation(mount_id: str, folder_name: str,
 
 @app.get("/api/tracks")
 def tracks_for_well(mount_id: str, folder_name: str) -> dict:
-    """The full tracks JSON for one well, used by the viewer to colour
-    overlays and to plot growth curves."""
+    """The full tracks payload for one well, used by the viewer to colour
+    overlays. Served from the DB (the ingested analysis results); falls back
+    to the legacy tracks/<well>.json for wells not yet in the DB."""
+    db = repo.get_tracks(folder_name)
+    if db is not None:
+        db["available"] = True
+        return db
     safe = folder_name.replace("/", "_")
     path = _TRACKS_ROOT / f"{safe}.json"
     if not path.is_file():
@@ -1176,8 +1182,42 @@ async def bundle_import(request: Request) -> dict:
     # Imported results may change alignment → drop the rendered-image cache.
     import shutil
     shutil.rmtree(_IMG_CACHE_ROOT, ignore_errors=True)
+    # Translate the just-extracted analysis results into DB rows.
+    ingested = _ingest_results_to_db(sorted(updated))
     return {"ok": True, "manifest": manifest,
-            "updated_experiments": sorted(updated)}
+            "updated_experiments": sorted(updated), **ingested}
+
+
+def _ingest_results_to_db(experiments: list[str]) -> dict:
+    """After a results bundle is extracted to disk, translate its alignment +
+    tracks/detections into DB rows (the cellpose mask PNGs stay on disk). This
+    is what makes "Add segmentation data" an upload to the database."""
+    ddir = _data_dir()
+    meta: dict[str, tuple] = {}
+    if ddir.is_dir():
+        for w in discover_grid(ddir).wells:
+            meta[w.folder_name] = (w.treatment, w.replicate, [tp.path for tp in w.timepoints])
+    n_align = n_tracks = 0
+    for name in experiments:
+        tr, rep, paths = meta.get(name, (None, None, None))
+        if paths and is_alignment_cached(paths):
+            al = compute_alignment_cached(paths)
+            repo.set_alignment(
+                name, _fingerprint(paths), _CACHE_VERSION,
+                al.canvas_shape[0], al.canvas_shape[1],
+                [list(o) for o in al.offsets], [list(p) for p in al.placements],
+                treatment=tr, replicate=rep)
+            n_align += 1
+        tpath = _TRACKS_ROOT / f"{name.replace('/', '_')}.json"
+        if tpath.is_file():
+            try:
+                tdata = json.loads(tpath.read_text())
+            except (OSError, ValueError):
+                tdata = None
+            if tdata:
+                src = _fingerprint(paths) if paths else None
+                n_tracks += repo.set_tracks(name, tdata, src, treatment=tr, replicate=rep)
+    return {"db_alignments": n_align, "db_tracks": n_tracks}
 
 
 @app.post("/api/upload-images")
