@@ -249,10 +249,9 @@ def main() -> None:
                 )
                 if not strips:
                     continue
-                (stitch_dir / f"track_{tr['id']}_raw.png").write_bytes(strips["raw"])
-                (stitch_dir / f"track_{tr['id']}_seg.png").write_bytes(strips["seg"])
-                if "diff" in strips:
-                    (stitch_dir / f"track_{tr['id']}_diff.png").write_bytes(strips["diff"])
+                for _v in ("raw", "seg", "diff", "shape"):
+                    if _v in strips:
+                        (stitch_dir / f"track_{tr['id']}_{_v}.png").write_bytes(strips[_v])
                 n_stitched += 1
 
         print(f"[{i:3d}/{len(well_dirs):3d}] {d.name:24s}  "

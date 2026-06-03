@@ -852,6 +852,11 @@ label.ghost:hover { border-color: var(--accent); color: var(--accent); }
   padding: 4px 6px;
 }
 
+.growth-controls {
+  display: flex; gap: 8px; flex-wrap: wrap;
+  margin: 10px 12px 0;
+}
+.growth-controls[hidden] { display: none; }
 .growth-plot {
   margin: 10px 12px 0;
   padding: 8px 12px;
