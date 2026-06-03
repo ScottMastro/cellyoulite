@@ -13,5 +13,6 @@ export const imgUrl = (key, thumb = 0, aligned = 0) => {
 
 // `state.overlayVersion` is bumped whenever validation overrides change so the
 // server-rendered edges PNG re-fetches instead of being served from cache.
-export const edgesUrl = (key, aligned = 1) =>
-  `/api/cellpose-edges?key=${encodeURIComponent(key)}&aligned=${aligned}&v=${state.overlayVersion}`;
+export const edgesUrl = (key, aligned = 1, hideInvalid = 0) =>
+  `/api/cellpose-edges?key=${encodeURIComponent(key)}&aligned=${aligned}`
+  + `&hide_invalid=${hideInvalid ? 1 : 0}&v=${state.overlayVersion}`;

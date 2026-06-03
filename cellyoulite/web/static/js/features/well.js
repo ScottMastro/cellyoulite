@@ -74,6 +74,7 @@ export async function openWell(mountId, folderName) {
   renderFilmstrip();
   showFrame(0);
   prewarmFrames(data, alignFlag());
+  syncChooserHeight();
   $("well-card").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
@@ -112,13 +113,22 @@ async function showFrame(i) {
   if (frameEl) {
     frameEl.classList.add("active");
     const fs = $("filmstrip");
-    const target = frameEl.offsetLeft - (fs.clientWidth - frameEl.clientWidth) / 2;
-    fs.scrollTo({ left: target, behavior: "smooth" });
+    // Center the active frame in the reel. Use rect math (not offsetLeft, whose
+    // offsetParent isn't the scroll container, so the target came out far too
+    // large and the reel pinned right — leaving the highlight off the left).
+    // Recenter instantly while playing; smooth can't keep up with the cadence.
+    const target = fs.scrollLeft
+      + (frameEl.getBoundingClientRect().left - fs.getBoundingClientRect().left)
+      - (fs.clientWidth - frameEl.clientWidth) / 2;
+    fs.scrollTo({ left: target, behavior: state.playTimer ? "auto" : "smooth" });
   }
 
   const a = alignFlag();
   const nextSrc = imgUrl(tp.key, VIEWER_PX, a);
-  const nextEdges = edgesUrl(tp.key, a);
+  // When deactivated organoids are hidden, also drop their segmentation from
+  // the server-rendered edges PNG (not just the SVG circle/label).
+  const hideInvalid = $("toggle-deactivated").checked ? 0 : 1;
+  const nextEdges = edgesUrl(tp.key, a, hideInvalid);
   const pre = new Image();
   pre.onload = () => {
     $("viewer-img").src = nextSrc;
@@ -179,7 +189,7 @@ function renderTrackedCircles(circles, t_idx, alignedFlag) {
   // Text label size scales with the circle so it stays readable on tiny
   // organoids without overpowering big ones. Capped at a sensible max.
   const labelFor = (cx, cy, r, txt, color, extra = "") => {
-    const fs = Math.min(28, Math.max(10, r * 0.55));
+    const fs = Math.min(40, Math.max(14, r * 0.8));
     return `<text x="${cx}" y="${cy}" text-anchor="middle" `
          + `dominant-baseline="central" `
          + `font-size="${fs.toFixed(1)}" `
@@ -413,6 +423,23 @@ const applyToggles = () => {
   if (stack) stack.classList.toggle("hide-deact", !$("toggle-deactivated").checked);
 };
 
+// Match the experiments list height to the playback viewer so the two columns
+// line up. Cleared (back to the CSS fallback) when no well is open or while
+// fullscreen, where the chooser isn't visible.
+function syncChooserHeight() {
+  const grid = $("thumb-grid");
+  const viewer = document.querySelector(".viewer");
+  const card = $("well-card");
+  if (state.well && viewer && !card.hidden && !card.classList.contains("fs")) {
+    const h = viewer.offsetHeight;
+    grid.style.height = h + "px";
+    grid.style.maxHeight = h + "px";
+  } else {
+    grid.style.height = "";
+    grid.style.maxHeight = "";
+  }
+}
+
 export function initWell() {
   // Click on a circle in the SVG → fetch a wide stitch PNG for that track.
   $("viewer-svg").addEventListener("click", async (e) => {
@@ -493,6 +520,7 @@ export function initWell() {
     const btn = $("viewer-fs");
     btn.textContent = on ? "✕" : "⛶";
     btn.title = on ? "exit fullscreen (Esc)" : "fullscreen";
+    syncChooserHeight();
   };
   $("viewer-fs").onclick = () => setFullscreen(!$("well-card").classList.contains("fs"));
   document.addEventListener("keydown", (e) => {
@@ -504,12 +532,17 @@ export function initWell() {
     setFullscreen(false);
     $("well-card").hidden = true;
     $("tracks-card").hidden = true;
+    syncChooserHeight();
   };
+
+  window.addEventListener("resize", syncChooserHeight);
 
   $("toggle-edges").onchange = applyToggles;
   $("toggle-cellpose").onchange = applyToggles;
   $("toggle-ids").onchange = applyToggles;
-  $("toggle-deactivated").onchange = applyToggles;
+  // Re-render the frame so the edges PNG refetches with/without the deactivated
+  // organoids' segmentation; applyToggles (inside showFrame) handles the circles.
+  $("toggle-deactivated").onchange = () => { if (state.well) showFrame(state.tIdx); };
   $("toggle-align").onchange = async () => {
     if (!state.well) return;
     if (alignFlag()) {
