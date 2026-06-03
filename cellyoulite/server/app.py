@@ -228,17 +228,7 @@ def reveal() -> dict:
 # ---------------------- user accounts ----------------------
 # Password-less profiles, stored in the DB (app_user). The deployment sits
 # behind an upstream HTTP basic-auth gate; once past that, a user just picks
-# (or creates) a username — there are no per-account credentials. users.json
-# is dual-written as a one-release safety net (see DB.md phase 6 to drop it).
-
-_USERS_PATH = Path.cwd() / "users.json"
-
-
-def _mirror_users_json() -> None:
-    try:
-        _USERS_PATH.write_text(json.dumps({"users": repo.list_users()}, indent=2))
-    except OSError:
-        pass
+# (or creates) a username — there are no per-account credentials.
 
 
 @app.get("/api/users")
@@ -254,8 +244,6 @@ def create_user(body: dict = Body(...)) -> dict:
     if len(name) > 40:
         raise HTTPException(status_code=400, detail="username too long (max 40)")
     username, created = repo.create_user(name)
-    if created:
-        _mirror_users_json()
     return {"ok": True, "username": username, "users": repo.list_users(), "created": created}
 
 
@@ -552,32 +540,17 @@ def track_job() -> dict:
         }
 
 
-def _validation_path(well_folder: str) -> Path:
-    safe = well_folder.replace("/", "_")
-    return _TRACKS_ROOT / f"{safe}__validation.json"
-
-
-# Validation (track filters + well sign-off) now lives in the DB; these helpers
-# read it so every consumer (grid, growth, boxplot, CSV) sees the same source.
+# Validation (track filters + well sign-off) lives in the DB; this helper reads
+# it so every consumer (grid, growth, boxplot, CSV) sees the same source.
 def _load_validation(well_folder: str) -> dict[int, bool]:
     return repo.get_validation(well_folder)["overrides"]
 
 
-def _is_human_validated(well_folder: str) -> bool:
-    return repo.get_validation(well_folder)["human_validated"]
-
-
-def _mirror_validation_json(folder_name: str, state: dict) -> None:
-    """Dual-write the JSON mirror (one-release safety net; drop in DB phase 6)."""
-    try:
-        _TRACKS_ROOT.mkdir(parents=True, exist_ok=True)
-        _validation_path(folder_name).write_text(json.dumps({
-            "well": folder_name,
-            "overrides": {str(k): v for k, v in state["overrides"].items()},
-            "human_validated": state["human_validated"],
-        }, indent=2))
-    except OSError:
-        pass
+def _load_tracks(folder_name: str) -> dict | None:
+    """A well's tracks + detections from the DB (the source of truth since the
+    analysis-result ingestion). Returns the tracks-JSON shape, or None when the
+    well has no tracks in the DB."""
+    return repo.get_tracks(folder_name)
 
 
 @app.get("/api/track-validation")
@@ -614,7 +587,6 @@ def set_track_validation(mount_id: str, folder_name: str,
     if "human_validated" in body:
         repo.set_human_validated(folder_name, bool(body["human_validated"]), decided_by)
     state = repo.get_validation(folder_name)
-    _mirror_validation_json(folder_name, state)
     return {"ok": True,
             "n_overrides": len(state["overrides"]),
             "human_validated": state["human_validated"]}
@@ -622,25 +594,12 @@ def set_track_validation(mount_id: str, folder_name: str,
 
 @app.get("/api/tracks")
 def tracks_for_well(mount_id: str, folder_name: str) -> dict:
-    """The full tracks payload for one well, used by the viewer to colour
-    overlays. Served from the DB (the ingested analysis results); falls back
-    to the legacy tracks/<well>.json for wells not yet in the DB."""
-    db = repo.get_tracks(folder_name)
-    if db is not None:
-        db["available"] = True
-        return db
-    safe = folder_name.replace("/", "_")
-    path = _TRACKS_ROOT / f"{safe}.json"
-    if not path.is_file():
-        return {"available": False, "tracks": [], "n_frames": 0}
-    try:
-        data = json.loads(path.read_text())
-    except (OSError, ValueError):
+    """The full tracks payload for one well (DB-backed — the ingested analysis
+    results), used by the viewer to colour overlays. Includes per-track stars."""
+    data = _load_tracks(folder_name)
+    if data is None:
         return {"available": False, "tracks": [], "n_frames": 0}
     data["available"] = True
-    stars = repo.get_stars(folder_name)
-    for t in data.get("tracks", []):
-        t["starred"] = stars.get(t.get("id"), False)
     return data
 
 
@@ -671,10 +630,9 @@ def track_stitch(mount_id: str, folder_name: str, track_id: int,
         return FileResponse(cached, media_type="image/png")
 
     _, well = _find_well(mount_id, folder_name)
-    path = _TRACKS_ROOT / f"{safe}.json"
-    if not path.is_file():
-        raise HTTPException(status_code=404, detail="no tracks file for well")
-    data = json.loads(path.read_text())
+    data = _load_tracks(folder_name)
+    if data is None:
+        raise HTTPException(status_code=404, detail="no tracks for well")
     track = next((t for t in data.get("tracks", []) if t["id"] == track_id), None)
     if track is None:
         raise HTTPException(status_code=404, detail=f"no track {track_id}")
@@ -722,10 +680,9 @@ def track_gif(mount_id: str, folder_name: str, track_id: int,
         raise HTTPException(status_code=400, detail="variant must be raw or seg")
     _, well = _find_well(mount_id, folder_name)
     safe = folder_name.replace("/", "_")
-    tracks_path = _TRACKS_ROOT / f"{safe}.json"
-    if not tracks_path.is_file():
+    data = _load_tracks(folder_name)
+    if data is None:
         raise HTTPException(status_code=404, detail="no tracks for well")
-    data = json.loads(tracks_path.read_text())
     track = next((t for t in data.get("tracks", []) if t["id"] == track_id), None)
     if track is None:
         raise HTTPException(status_code=404, detail=f"no track {track_id}")
@@ -797,13 +754,8 @@ def growth_csv(treatment: str | None = None) -> Response:
         "area_px", "area_px_t0", "log2_fold",
     ])
     for w in spec_wells:
-        safe = w.folder_name.replace("/", "_")
-        tpath = _TRACKS_ROOT / f"{safe}.json"
-        if not tpath.is_file():
-            continue
-        try:
-            data = json.loads(tpath.read_text())
-        except (OSError, ValueError):
+        data = _load_tracks(w.folder_name)
+        if data is None:
             continue
         overrides = _load_validation(w.folder_name)
         tp_minutes = {tp.label: tp.minutes for tp in w.timepoints}
@@ -867,13 +819,8 @@ def boxplot_data(treatment: str | None = None, by_replicate: int = 0) -> dict:
     minutes_seen: set[int] = set()
 
     for w in spec_wells:
-        safe = w.folder_name.replace("/", "_")
-        tpath = _TRACKS_ROOT / f"{safe}.json"
-        if not tpath.is_file():
-            continue
-        try:
-            data = json.loads(tpath.read_text())
-        except (OSError, ValueError):
+        data = _load_tracks(w.folder_name)
+        if data is None:
             continue
         overrides = _load_validation(w.folder_name)
         tp_minutes = {tp.label: tp.minutes for tp in w.timepoints}
@@ -955,14 +902,12 @@ def well_gif(mount_id: str, folder_name: str,
     from skimage.transform import resize as _resize
 
     mount, well = _find_well(mount_id, folder_name)
-    spec = _wells_for_mount(mount)
     safe = folder_name.replace("/", "_")
 
     # Tracks + validation overrides → which (track_id, valid) per frame.
-    tracks_path = _TRACKS_ROOT / f"{safe}.json"
-    if not tracks_path.is_file():
-        raise HTTPException(status_code=404, detail="no tracks file")
-    tdata = json.loads(tracks_path.read_text())
+    tdata = _load_tracks(folder_name)
+    if tdata is None:
+        raise HTTPException(status_code=404, detail="no tracks for well")
     overrides = _load_validation(folder_name)
 
     # Per-frame label→(track_id, hue_rgb). Build once.
@@ -1075,11 +1020,9 @@ def well_growth(mount_id: str, folder_name: str, valid_only: int = 1) -> dict:
     Returns {tracks: [{id, valid, color_index, points: [{minutes, area_px,
     norm}, ...]}, ...]}. norm = area_px / area_px_at_first_detection."""
     _, well = _find_well(mount_id, folder_name)
-    safe = folder_name.replace("/", "_")
-    path = _TRACKS_ROOT / f"{safe}.json"
-    if not path.is_file():
+    data = _load_tracks(folder_name)
+    if data is None:
         return {"available": False, "tracks": []}
-    data = json.loads(path.read_text())
     overrides = _load_validation(folder_name)
     tp_minutes = {tp.label: tp.minutes for tp in well.timepoints}
     out: list[dict] = []
@@ -1556,13 +1499,8 @@ def _hue_for_track(track_id: int) -> tuple[int, int, int]:
 def _label_to_track(mount, well, t_idx, masks):
     """Map mask instance label → (track_id, valid) for the given frame, by
     looking up which track owns each instance based on its centroid."""
-    safe = well.folder_name.replace("/", "_")
-    track_path = _TRACKS_ROOT / f"{safe}.json"
-    if not track_path.is_file():
-        return {}
-    try:
-        data = json.loads(track_path.read_text())
-    except (OSError, ValueError):
+    data = _load_tracks(well.folder_name)
+    if data is None:
         return {}
     overrides = _load_validation(well.folder_name)
     # Pull this frame's detections by t_idx for fast lookup.
