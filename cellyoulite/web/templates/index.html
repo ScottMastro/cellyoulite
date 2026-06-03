@@ -8,7 +8,7 @@
   <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
   <link rel="icon" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='13' fill='none' stroke='%2335b779' stroke-width='2'/><circle cx='16' cy='16' r='6' fill='%2335b779'/></svg>">
 </head>
-<body>
+<body data-version="{{ version }}">
 
 <!-- Password-less profile gate: shown until a user is chosen; pre-hidden
      server-side when a user cookie is already present. -->
@@ -1448,8 +1448,9 @@
     const header = document.querySelector(".app-header");
     const name = document.getElementById("brand-name");
     if (!header || !name) return;
-    const NORMAL = `Cell<em>x</em>You Lite<span class="tag" id="brand-tag">organoid · v{{ version }}</span>`;
-    const NEON   = `Cell<em>x</em>Yue Lite<span class="tag" id="brand-tag">organoid · v{{ version }}</span>`;
+    const V = document.body.dataset.version || "";
+    const NORMAL = `Cell<em>x</em>You Lite<span class="tag" id="brand-tag">organoid · v${V}</span>`;
+    const NEON   = `Cell<em>x</em>Yue Lite<span class="tag" id="brand-tag">organoid · v${V}</span>`;
     let clicks = 0, timer = null;
     function arm() {
       const tag = document.getElementById("brand-tag");
