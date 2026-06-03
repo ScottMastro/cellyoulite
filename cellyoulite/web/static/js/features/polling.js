@@ -66,7 +66,7 @@ async function combinedPoll() {
   const cpChanged = await refreshCellposeStatus();
   if (cpChanged || trackChanged) {
     if (state.grid) grid.renderThumbGrid(state.grid);
-    if (state.well) { well.renderFilmstrip(); well.updateWellCpStatus(); }
+    if (state.well) { well.renderFilmstrip(); }
   }
   setTimeout(combinedPoll, 5000);
 }
