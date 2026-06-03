@@ -27,6 +27,7 @@ export async function openWell(mountId, folderName) {
   document.querySelector(`.thumb[data-mount="${CSS.escape(mountId)}"][data-folder-name="${CSS.escape(folderName)}"]`)?.classList.add("selected");
 
   $("well-card").hidden = false;
+  $("tracks-card").hidden = false;
 
   const qs = `mount_id=${encodeURIComponent(mountId)}&folder_name=${encodeURIComponent(folderName)}`;
   const r = await fetch(`/api/well?${qs}`);
@@ -487,7 +488,11 @@ export function initWell() {
 
   $("play-btn").onclick = () => { state.playTimer ? stopPlay() : startPlay(); };
   $("speed").onchange = () => { /* picked up on the next _playStep tick */ };
-  $("well-close").onclick = () => { stopPlay(); $("well-card").hidden = true; };
+  $("well-close").onclick = () => {
+    stopPlay();
+    $("well-card").hidden = true;
+    $("tracks-card").hidden = true;
+  };
 
   $("toggle-edges").onchange = applyToggles;
   $("toggle-cellpose").onchange = applyToggles;

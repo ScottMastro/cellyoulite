@@ -100,92 +100,92 @@
     <div class="pills" id="grid-pills" hidden></div>
   </section>
 
-  <section class="card" id="grid-card" hidden>
-    <h2>Experiments</h2>
-    <div class="grid-wrap">
-      <div id="thumb-grid" class="thumb-grid"></div>
+  <section class="card workspace" id="grid-card" hidden>
+    <div class="chooser">
+      <h2>Experiments</h2>
+      <div id="thumb-grid"></div>
+    </div>
+
+    <div class="viewer-pane" id="well-card" hidden>
+      <h2 id="well-title">Well · timeseries <span id="well-cp-status" class="cp-status-inline"></span></h2>
+      <div class="viewer">
+        <div class="viewer-toolbar">
+          <span id="well-frame-label" class="viewer-title">—</span>
+          <div class="spacer"></div>
+          <label class="toggle"><input type="checkbox" id="toggle-align" checked>
+            <span class="swatch swatch-align"></span> align frames</label>
+          <label class="toggle"><input type="checkbox" id="toggle-edges" checked>
+            <span class="swatch swatch-edges"></span> pixel edges</label>
+          <label class="toggle"><input type="checkbox" id="toggle-cellpose">
+            <span class="swatch swatch-cellpose"></span> circles</label>
+          <label class="toggle"><input type="checkbox" id="toggle-ids" checked>
+            <span class="swatch swatch-ids">#</span> ids</label>
+          <span id="viewer-stat" class="pill"></span>
+          <button id="well-close" class="ghost">close</button>
+        </div>
+
+        <div class="viewer-canvas">
+          <div class="image-stack">
+            <img id="viewer-img" class="base" alt="">
+            <img id="layer-edges-img" class="overlay" alt="">
+            <svg id="viewer-svg" class="overlay" preserveAspectRatio="none">
+              <g id="layer-cellpose"></g>
+              <g id="layer-cellpose-labels"></g>
+            </svg>
+          </div>
+        </div>
+
+        <div class="playbar">
+          <button id="play-btn" class="primary play-btn" title="play/pause">▶</button>
+          <input id="scrub" type="range" min="0" max="0" value="0" step="1">
+          <span id="scrub-label" class="mono small">0 / 0</span>
+          <label class="speed">speed
+            <select id="speed">
+              <option value="2000">0.125×</option>
+              <option value="1000">0.25×</option>
+              <option value="500" selected>0.5×</option>
+              <option value="250">1×</option>
+              <option value="125">2×</option>
+              <option value="60">4×</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="filmstrip-wrap">
+          <div id="filmstrip" class="filmstrip"></div>
+        </div>
+      </div>
     </div>
   </section>
 
-  <section class="card" id="well-card" hidden>
-    <h2 id="well-title">Well · timeseries <span id="well-cp-status" class="cp-status-inline"></span></h2>
-
-    <div class="viewer">
-      <div class="viewer-toolbar">
-        <span id="well-frame-label" class="viewer-title">—</span>
-        <div class="spacer"></div>
-        <label class="toggle"><input type="checkbox" id="toggle-align" checked>
-          <span class="swatch swatch-align"></span> align frames</label>
-        <label class="toggle"><input type="checkbox" id="toggle-edges" checked>
-          <span class="swatch swatch-edges"></span> pixel edges</label>
-        <label class="toggle"><input type="checkbox" id="toggle-cellpose">
-          <span class="swatch swatch-cellpose"></span> circles</label>
-        <label class="toggle"><input type="checkbox" id="toggle-ids" checked>
-          <span class="swatch swatch-ids">#</span> ids</label>
-        <span id="viewer-stat" class="pill"></span>
-        <button id="well-close" class="ghost">close</button>
+  <section class="card" id="tracks-card" hidden>
+    <div id="all-tracks" class="all-tracks" hidden>
+      <div class="all-tracks-head">
+        <span class="job-bar-label">tracks in this well</span>
+        <span id="all-tracks-count" class="hint">—</span>
+        <label class="toggle"><input type="checkbox" id="atr-annotated" checked>
+          <span class="swatch swatch-cellpose"></span> show annotated</label>
       </div>
-
-      <div class="viewer-canvas">
-        <div class="image-stack">
-          <img id="viewer-img" class="base" alt="">
-          <img id="layer-edges-img" class="overlay" alt="">
-          <svg id="viewer-svg" class="overlay" preserveAspectRatio="none">
-            <g id="layer-cellpose"></g>
-            <g id="layer-cellpose-labels"></g>
-          </svg>
-        </div>
+      <div id="all-tracks-list" class="all-tracks-list"></div>
+      <div class="all-tracks-foot">
+        <button id="validate-well" class="primary">Validate well</button>
+        <span id="validate-status" class="hint"></span>
+        <button id="export-gif" class="ghost">Export GIF (accepted tracks)</button>
+        <span id="export-gif-status" class="hint"></span>
       </div>
-
-      <div class="playbar">
-        <button id="play-btn" class="primary play-btn" title="play/pause">▶</button>
-        <input id="scrub" type="range" min="0" max="0" value="0" step="1">
-        <span id="scrub-label" class="mono small">0 / 0</span>
-        <label class="speed">speed
-          <select id="speed">
-            <option value="2000">0.125×</option>
-            <option value="1000">0.25×</option>
-            <option value="500" selected>0.5×</option>
-            <option value="250">1×</option>
-            <option value="125">2×</option>
-            <option value="60">4×</option>
-          </select>
-        </label>
-      </div>
-
-      <div class="filmstrip-wrap">
-        <div id="filmstrip" class="filmstrip"></div>
-      </div>
-
-      <div id="all-tracks" class="all-tracks" hidden>
-        <div class="all-tracks-head">
-          <span class="job-bar-label">tracks in this well</span>
-          <span id="all-tracks-count" class="hint">—</span>
-          <label class="toggle"><input type="checkbox" id="atr-annotated" checked>
-            <span class="swatch swatch-cellpose"></span> show annotated</label>
-        </div>
-        <div id="all-tracks-list" class="all-tracks-list"></div>
-        <div class="all-tracks-foot">
-          <button id="validate-well" class="primary">Validate well</button>
-          <span id="validate-status" class="hint"></span>
-          <button id="export-gif" class="ghost">Export GIF (accepted tracks)</button>
-          <span id="export-gif-status" class="hint"></span>
-        </div>
-      </div>
-
-      <div id="track-stitch" class="track-stitch" hidden>
-        <div class="track-stitch-head">
-          <span id="track-stitch-title">track</span>
-          <button id="track-stitch-close" class="ghost">×</button>
-        </div>
-        <div class="track-stitch-scroll">
-          <img id="track-stitch-img" alt="track over time">
-        </div>
-      </div>
-
-      <div id="growth-plot" class="growth-plot"></div>
-
     </div>
+
+    <div id="track-stitch" class="track-stitch" hidden>
+      <div class="track-stitch-head">
+        <span id="track-stitch-title">track</span>
+        <button id="track-stitch-close" class="ghost">×</button>
+      </div>
+      <div class="track-stitch-scroll">
+        <img id="track-stitch-img" alt="track over time">
+      </div>
+    </div>
+
+    <div id="growth-plot" class="growth-plot"></div>
   </section>
 
   <section class="card" id="boxplot-card" hidden>
@@ -210,11 +210,6 @@
   </section>
 
 </main>
-
-<div id="thumb-preview" aria-hidden="true">
-  <img id="thumb-preview-img" alt="">
-  <div class="cap" id="thumb-preview-cap"></div>
-</div>
 
 <footer>CellxYou Lite · <span id="ver-mono">v{{ version }}</span></footer>
 
