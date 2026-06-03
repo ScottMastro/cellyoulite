@@ -632,7 +632,7 @@ def track_stitch(mount_id: str, folder_name: str, track_id: int,
         raise HTTPException(status_code=400, detail="variant must be raw/seg/diff/shape/both")
     safe = folder_name.replace("/", "_")
     cached = _TRACKS_ROOT / safe / f"track_{track_id}_{variant}.png"
-    if cached.is_file() and variant in ("raw", "seg", "diff", "shape"):
+    if cached.is_file() and variant in ("raw", "seg", "diff", "shape", "both"):
         return FileResponse(cached, media_type="image/png")
 
     _, well = _find_well(mount_id, folder_name)
