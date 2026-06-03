@@ -801,7 +801,8 @@ def growth_csv(treatment: str | None = None) -> Response:
 
 
 @app.get("/api/boxplot-data")
-def boxplot_data(treatment: str | None = None, by_replicate: int = 0) -> dict:
+def boxplot_data(treatment: str | None = None, by_replicate: int = 0,
+                 stars_only: int = 0) -> dict:
     """Pool every accepted track from every replicate of each requested
     treatment, normalise to log2(area / area@t0), and return per-treatment
     per-timepoint box statistics. When by_replicate=1, replicates are kept
@@ -834,6 +835,8 @@ def boxplot_data(treatment: str | None = None, by_replicate: int = 0) -> dict:
         for tr in data.get("tracks", []):
             accepted = overrides.get(tr["id"], bool(tr.get("valid")))
             if not accepted:
+                continue
+            if stars_only and not tr.get("starred"):
                 continue
             dets = tr.get("detections", [])
             if not dets:

@@ -15,6 +15,6 @@ export const state = {
   humanValidatedByWell: new Map(), // folder_name -> bool
   wellAlignCache: null,       // last /api/well-align response for the open well
   pauseOnHoverWasPlaying: false,
-  boxMode: "one",             // "one" = current well's treatment; "all" = every treatment
+  boxDrill: null,             // Growth distributions: null = all conditions; else a treatment name (zoomed)
   user: null,                 // selected profile name
 };

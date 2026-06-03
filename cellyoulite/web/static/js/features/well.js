@@ -75,7 +75,6 @@ export async function openWell(mountId, folderName) {
   renderAllTracks();
   refreshValidateButton();
   growth.fetchGrowthPlot(qs);
-  boxplot.refreshBoxplot();
   renderFilmstrip();
   showFrame(0);
   prewarmFrames(data, alignFlag());
@@ -344,6 +343,9 @@ function renderAllTracks() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ starred: next, user: state.user }),
         });
+        // Keep the stars-only views (curves + distributions) live.
+        growth.fetchGrowthPlot(qs);
+        boxplot.refreshBoxplot();
       } catch (err) {
         star.classList.toggle("on", !next);   // revert on failure
         if (tk) tk.starred = !next;

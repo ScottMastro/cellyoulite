@@ -803,28 +803,12 @@ button.ghost:hover { border-color: var(--err); color: var(--err); }
   object-fit: contain;
 }
 
-.tab-bar {
-  display: flex; gap: 4px; align-items: center;
+.box-bar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   margin: 0 0 10px;
-  border-bottom: 1px solid var(--rule);
 }
-.tab-btn {
-  background: transparent; color: var(--ink-soft);
-  border: 1px solid transparent; border-bottom: none;
-  padding: 6px 14px;
-  font: 600 12px var(--mono);
-  letter-spacing: 0.04em; text-transform: uppercase;
-  cursor: pointer;
-  margin-bottom: -1px;   /* overlap the underline */
-  border-radius: 6px 6px 0 0;
-}
-.tab-btn:hover { color: var(--ink); }
-.tab-btn.active {
-  background: var(--panel-2);
-  color: var(--accent);
-  border-color: var(--rule);
-  border-bottom: 1px solid var(--panel-2);
-}
+.box-summary { margin-left: auto; font: 500 12px var(--mono); color: var(--ink-soft); }
+.box-summary strong { color: var(--accent); }
 .boxplot-svg { width: 100%; height: auto; display: block; }
 .inline-select {
   background: #1a1f29; color: #cdf;
@@ -850,7 +834,10 @@ label.ghost:hover { border-color: var(--accent); color: var(--accent); }
   border: 1px solid var(--rule);
   border-radius: 6px;
   padding: 4px 6px;
+  cursor: pointer;
+  transition: border-color .12s, box-shadow .12s;
 }
+.boxplot-facet:hover { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-soft); }
 
 .growth-box {
   margin: 10px 12px 0;

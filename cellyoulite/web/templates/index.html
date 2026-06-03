@@ -195,12 +195,10 @@
 
   <section class="card" id="boxplot-card" hidden>
     <h2>Growth distributions</h2>
-    <p class="hint">area normalised to t0, pooled across replicates of each treatment. Scale toggles the y-axis; the slope chips are always per-hour fits to the median.</p>
-    <div class="tab-bar">
-      <button id="box-tab-one" class="tab-btn active" data-mode="one">This condition</button>
-      <button id="box-tab-all" class="tab-btn" data-mode="all">All conditions</button>
-      <label class="toggle"><input type="checkbox" id="box-by-rep">
-        separate replicates</label>
+    <div class="box-bar">
+      <button id="box-back" class="ghost" hidden>← All conditions</button>
+      <label class="toggle"><input type="checkbox" id="box-stars-only"> ★ stars only</label>
+      <label class="toggle"><input type="checkbox" id="box-by-rep"> separate replicates</label>
       <label class="toggle">scale
         <select id="box-scale" class="inline-select">
           <option value="fold" selected>fold (×)</option>
@@ -208,7 +206,7 @@
           <option value="log2">log₂</option>
         </select>
       </label>
-      <span id="box-summary" class="hint" style="margin-left:auto"></span>
+      <span id="box-summary" class="box-summary"></span>
       <button id="box-csv" class="ghost" title="download R-friendly long-format CSV">CSV ↓</button>
     </div>
     <div id="boxplot"></div>
