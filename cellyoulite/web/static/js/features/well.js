@@ -541,10 +541,14 @@ export function initWell() {
     btn.disabled = true; btn.textContent = "rendering…";
     try {
       // Follow the viewer's own toggles, so the GIF matches what's on screen.
+      // "align frames" and "circles" have no equivalent: the GIF is always
+      // aligned, and it draws segmentation boundaries rather than circles.
       const acceptedOnly = $("toggle-deactivated").checked ? 0 : 1;
       const labels = $("toggle-ids").checked ? 1 : 0;
+      const edges = $("toggle-edges").checked ? 1 : 0;
       const r = await fetch(`/api/well-gif?${openWellQs()}`
-                            + `&accepted_only=${acceptedOnly}&labels=${labels}`);
+                            + `&accepted_only=${acceptedOnly}&labels=${labels}`
+                            + `&edges=${edges}`);
       if (!r.ok) throw new Error(r.statusText);
       const blob = await r.blob();
       const url = URL.createObjectURL(blob);

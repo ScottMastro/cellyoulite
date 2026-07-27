@@ -1048,7 +1048,7 @@ def boxplot_data(treatment: str | None = None, by_replicate: int = 0,
 @app.get("/api/well-gif")
 def well_gif(mount_id: str, batch: str, folder_name: str,
               max_width: int = 800, fps: int = 4,
-              accepted_only: int = 1, labels: int = 1) -> Response:
+              accepted_only: int = 1, labels: int = 1, edges: int = 1) -> Response:
     """Animated GIF of every aligned frame in a well, with accepted organoids
     coloured (boundary + semi-transparent fill in each organoid's hue). The
     aligned canvas naturally pads with black where frames have shifted, so
@@ -1125,8 +1125,10 @@ def well_gif(mount_id: str, batch: str, folder_name: str,
                     # Equivalent radius for label sizing.
                     r_eq = int(round((int(counts[lab]) / 3.14159) ** 0.5))
                     label_jobs.append((cx, cy, entry["track_id"], entry["hue"], r_eq))
-                sel = drawn[masks]
-                if sel.any():
+                # edges=0 leaves the frames untinted. The mask is still read,
+                # because the id labels are sized from each instance's area.
+                sel = drawn[masks] if edges else None
+                if sel is not None and sel.any():
                     hues = hue_lut[masks[sel]]
                     canvas[sel] = canvas[sel] * (1 - fill_alpha) + hues * fill_alpha
                     bnd = find_boundaries(masks, mode="thick") & sel
