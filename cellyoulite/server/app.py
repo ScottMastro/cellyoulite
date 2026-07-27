@@ -1699,24 +1699,36 @@ def _label_to_track(mount, batch, well, t_idx, masks):
                 break
     if not frame_dets:
         return {}
-    # For each instance label, find its centroid and match to the closest
-    # track-detection centroid (cheap; aligned-canvas coords match).
+    # Centroid of every instance in one pass. `np.where(masks == lab)` per
+    # label re-scans the whole image each time, which on a dense frame (>1000
+    # instances) cost seconds; bincount does it in a single sweep.
+    flat = masks.ravel()
+    counts = np.bincount(flat)
+    n_lab = counts.size
+    if n_lab < 2:
+        return {}
+    ys, xs = np.indices(masks.shape)
+    sum_y = np.bincount(flat, weights=ys.ravel(), minlength=n_lab)
+    sum_x = np.bincount(flat, weights=xs.ravel(), minlength=n_lab)
+    present = np.flatnonzero(counts)
+    present = present[present != 0]
+    if present.size == 0:
+        return {}
+    cys = sum_y[present] / counts[present]
+    cxs = sum_x[present] / counts[present]
+
+    # Nearest detection per instance, vectorised over both sides.
+    det = np.array([(fcx, fcy) for fcx, fcy, _, _ in frame_dets], dtype=float)
+    d2 = ((cxs[:, None] - det[None, :, 0]) ** 2
+          + (cys[:, None] - det[None, :, 1]) ** 2)
+    nearest = d2.argmin(axis=1)
+    best_d2 = d2[np.arange(d2.shape[0]), nearest]
+
     out: dict[int, tuple[int, bool]] = {}
-    labels = np.unique(masks)
-    for lab in labels:
-        if lab == 0:
-            continue
-        ys, xs = np.where(masks == lab)
-        if ys.size == 0:
-            continue
-        cx, cy = float(xs.mean()), float(ys.mean())
-        best = None
-        for fcx, fcy, tid, valid in frame_dets:
-            d = (fcx - cx) ** 2 + (fcy - cy) ** 2
-            if best is None or d < best[0]:
-                best = (d, tid, valid)
-        if best and best[0] < 9.0 ** 2:  # within 9 px
-            out[int(lab)] = (best[1], best[2])
+    for lab, j, dist2 in zip(present, nearest, best_d2, strict=True):
+        if dist2 < 9.0 ** 2:            # within 9 px
+            _, _, tid, valid = frame_dets[j]
+            out[int(lab)] = (tid, valid)
     return out
 
 
@@ -1776,11 +1788,17 @@ def cellpose_edges(key: str, aligned: int = 1, by_track: int = 1,
     if by_track:
         lab2tr = _label_to_track(mount, batch, well, t_idx, masks)
         fill_a = max(0, min(255, int(fill_alpha)))
+        # Colour via a per-label lookup table rather than a pass per instance.
+        # A frame can hold >1000 instances, and `masks == lab` scans the whole
+        # image each time — that made this O(instances x pixels) and cost ~18 s
+        # a frame on a dense well. Indexing the LUT is a single pass.
+        n_lab = int(masks.max()) + 1
+        lut_rgb = np.zeros((n_lab, 3), dtype=np.uint8)
+        lut_fill = np.zeros(n_lab, dtype=np.uint8)
+        lut_edge = np.zeros(n_lab, dtype=np.uint8)
         for lab in np.unique(masks):
             if lab == 0:
                 continue
-            inst = masks == lab
-            inst_boundary = inst & boundary
             tr = lab2tr.get(int(lab))
             if tr is None:
                 bcol = (255, 255, 255)  # untracked → white
@@ -1790,11 +1808,13 @@ def cellpose_edges(key: str, aligned: int = 1, by_track: int = 1,
                 bcol = (138, 138, 138)  # invalid → desaturated grey
             else:
                 bcol = _hue_for_track(tr[0])
-            if fill:
-                # Semi-transparent interior in the same hue.
-                bgra[inst] = (bcol[0], bcol[1], bcol[2], fill_a)
-            # Boundary on top, fully opaque.
-            bgra[inst_boundary] = (bcol[0], bcol[1], bcol[2], 255)
+            lut_rgb[lab] = bcol
+            lut_fill[lab] = fill_a if fill else 0
+            lut_edge[lab] = 255         # boundary on top, fully opaque
+        bgra[..., :3] = lut_rgb[masks]
+        bgra[..., 3] = lut_fill[masks]
+        on_edge = boundary & (masks > 0)
+        bgra[..., 3][on_edge] = lut_edge[masks[on_edge]]
     else:
         if fill:
             inst_any = masks > 0

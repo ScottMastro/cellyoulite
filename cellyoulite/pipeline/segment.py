@@ -26,20 +26,28 @@ def masks_to_circles(masks: np.ndarray, *,
 
     This is pure post-processing — the mask is what the GPU produced, so
     re-running it at a different threshold needs no segmentation.
+
+    Areas and centroids come from bincount rather than a `masks == label`
+    scan per instance: a dense frame holds >1000 instances, and re-scanning
+    the whole image for each made this quadratic in practice.
     """
-    out = []
-    for label in np.unique(masks):
-        if label == 0:
-            continue
-        ys, xs = np.where(masks == label)
-        if ys.size < min_area_px:
-            continue
-        r = float(np.sqrt(ys.size / np.pi))
-        if r < min_radius_px or r > max_radius_px:
-            continue
-        out.append({"cx": float(xs.mean()), "cy": float(ys.mean()),
-                    "r": r, "area_px": int(ys.size)})
-    return out
+    flat = masks.ravel()
+    counts = np.bincount(flat)
+    if counts.size < 2:
+        return []
+    ys, xs = np.indices(masks.shape)
+    sum_y = np.bincount(flat, weights=ys.ravel(), minlength=counts.size)
+    sum_x = np.bincount(flat, weights=xs.ravel(), minlength=counts.size)
+
+    radii = np.sqrt(counts / np.pi)
+    keep = (counts >= min_area_px) & (radii >= min_radius_px) \
+        & (radii <= max_radius_px)
+    keep[0] = False                      # label 0 is background
+    labels = np.flatnonzero(keep)
+
+    return [{"cx": float(sum_x[i] / counts[i]), "cy": float(sum_y[i] / counts[i]),
+             "r": float(radii[i]), "area_px": int(counts[i])}
+            for i in labels]
 
 
 @dataclass(frozen=True)
