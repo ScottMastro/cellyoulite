@@ -7,6 +7,8 @@ is that every endpoint answers, for both batches, with a well name that exists
 in both."""
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
@@ -134,3 +136,46 @@ def test_unknown_batch_is_a_404_not_a_crash(client):
     r = client.get("/api/well", params={"mount_id": _mount(client),
                                         "batch": "nope", "folder_name": WELL})
     assert r.status_code == 404
+
+
+def _seed_organoid(client, batch):
+    """One organoid with a detection in each frame, plus a mask sidecar so the
+    stitch renderer has something to crop."""
+    import cv2
+    import numpy as np
+
+    from cellyoulite.db import repo
+    dets = [{"t_idx": i, "label": lab, "cx": 40.0, "cy": 32.0, "r": 9.0,
+             "area_px": 254} for i, lab in enumerate(LABELS)]
+    repo.set_tracks(batch, WELL, {"n_frames": len(LABELS), "tracks": [
+        {"id": 1, "n_detections": len(dets), "first_t": 0,
+         "last_t": len(dets) - 1, "valid": True, "detections": dets}]})
+    cache = Path(".cellpose_cache") / batch / WELL
+    cache.mkdir(parents=True, exist_ok=True)
+    mask = np.zeros((64, 80), dtype=np.uint16)
+    mask[24:41, 32:49] = 1
+    for lab in LABELS:
+        cv2.imwrite(str(cache / f"{lab}.mask.png"), mask)
+
+
+@pytest.mark.parametrize("batch", [MAY, JUL])
+def test_stitch_thumbnail_is_small_and_cached(client, batch):
+    """A miss used to ignore `thumb` and ship the full-resolution strip, then
+    re-render it on every view. Both are load-bearing for the organoid list,
+    which renders one row per organoid."""
+    _seed_organoid(client, batch)
+    q = {"mount_id": _mount(client), "batch": batch, "folder_name": WELL,
+         "track_id": 1, "variant": "both"}
+
+    thumbed = client.get("/api/track-stitch", params={**q, "thumb": 128})
+    assert thumbed.status_code == 200, thumbed.text
+    full = client.get("/api/track-stitch", params=q)
+    assert full.status_code == 200
+
+    # The thumbnail must not be the full-resolution strip.
+    assert len(thumbed.content) < len(full.content)
+    # And the render must have been persisted, not repeated.
+    strip = Path("tracks") / batch / WELL / "track_1_both.png"
+    assert strip.is_file()
+    again = client.get("/api/track-stitch", params={**q, "thumb": 128})
+    assert again.content == thumbed.content

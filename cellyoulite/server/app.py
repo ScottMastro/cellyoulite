@@ -808,6 +808,20 @@ def track_stitch(mount_id: str, batch: str, folder_name: str, track_id: int,
     )
     if not strips:
         raise HTTPException(status_code=404, detail="no panels rendered")
+
+    # Persist what we just rendered. The tracking script only caches strips for
+    # organoids it considered valid, so every rejected one was re-rendering on
+    # each view — ~0.3 s of image work per row, repeated forever.
+    cached.parent.mkdir(parents=True, exist_ok=True)
+    tmp = cached.with_suffix(".png.tmp")
+    tmp.write_bytes(strips[variant])
+    tmp.replace(cached)                      # atomic publish
+
+    # The list rows are 88 px tall, so honour `thumb` here too. It used to
+    # apply only on a cache hit, meaning a miss shipped the full-resolution
+    # strip (~0.5 MB) to fill a thumbnail.
+    if thumb and thumb > 0:
+        return _stitch_thumb(cached, batch, folder_name, track_id, variant, int(thumb))
     return Response(content=strips[variant], media_type="image/png")
 
 
