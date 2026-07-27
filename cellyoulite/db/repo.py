@@ -2,14 +2,8 @@
 Each call uses a short-lived connection (connect() sets WAL + busy_timeout)."""
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
 from .connection import connect
-
-
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
-
+from .connection import now_iso as _now
 
 # ---------------------------- wells / tracks ----------------------------
 

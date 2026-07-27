@@ -5,7 +5,13 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
+
+
+def now_iso() -> str:
+    """UTC timestamp in the form stored in every *_at / first_seen column."""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def db_path() -> Path:
