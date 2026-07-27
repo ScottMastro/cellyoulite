@@ -31,14 +31,14 @@ import tarfile
 import time
 from pathlib import Path
 
-from cellyoulite.io.grid import is_experiment_folder
+from cellyoulite.io.grid import is_experiment_dir
 
 _PKG_ROOT = Path(__file__).resolve().parent          # .../cellyoulite
 _REPO_ROOT = _PKG_ROOT.parent                        # repo root (holds scripts/)
 _SCRIPTS = _REPO_ROOT / "scripts"
 
 # Result dirs that make up an uploadable bundle (matches the web exporter).
-_RESULT_DIRS = [".align_cache", ".cellpose_cache", "tracks", "annotations"]
+_RESULT_DIRS = [".align_cache", ".cellpose_cache", "tracks"]
 # "[  12/ 420]" style progress emitted by every stage script.
 _PROGRESS_RE = re.compile(r"\[\s*(\d+)\s*/\s*(\d+)\s*\]")
 
@@ -79,12 +79,14 @@ def _setup_workdir(console, input_arg, workdir: Path) -> list[str]:
             if not data.is_dir():
                 _fail(console, "archive has no data/ — is this an images bundle?")
         elif p.is_dir():
-            if any(c.is_dir() and is_experiment_folder(c.name) for c in p.iterdir()):
+            if any(is_experiment_dir(c) for c in p.iterdir()):
                 src = p
             elif (p / "data").is_dir():
                 src = p / "data"
             else:
-                _fail(console, f"no '<treatment> r<rep>' experiment folders in {p}")
+                _fail(console, f"no experiment folders in {p} — expected "
+                               "'<treatment> r<rep>' dirs or plate folders of "
+                               "timestamped images")
             if data.is_symlink():
                 data.unlink()
             elif data.exists() and data.resolve() != src.resolve():
@@ -98,8 +100,7 @@ def _setup_workdir(console, input_arg, workdir: Path) -> list[str]:
     if not data.is_dir():
         _fail(console, f"no data in workdir ({data}); pass an input folder/archive")
 
-    exps = sorted(c.name for c in data.iterdir()
-                  if c.is_dir() and is_experiment_folder(c.name))
+    exps = sorted(c.name for c in data.iterdir() if is_experiment_dir(c))
     if not exps:
         _fail(console, f"no experiment folders under {data}")
     return exps

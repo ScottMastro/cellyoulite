@@ -1,6 +1,6 @@
 """Score the circle detector against manual annotations.
 
-For each annotated frame in annotations/, load the corresponding image,
+For each annotated frame in the database, load the corresponding image,
 align it, run detect_circles(), and compare to the ground-truth circles.
 
 Match rule: a predicted circle (cx', cy', r') matches a GT circle (cx, cy, r)
@@ -18,7 +18,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,10 +26,11 @@ import imageio.v2 as imageio
 import numpy as np
 from skimage.io import imread
 
+from cellyoulite.db import repo
+from cellyoulite.db.migrate import migrate
 from cellyoulite.io.grid import discover_grid
 from cellyoulite.pipeline.align import compute_alignment_cached, paste_onto_canvas
 from cellyoulite.pipeline.circle_methods import detect_circles
-
 
 MATCH_CENTER_FRAC = 0.5   # |Δcenter| <= this × GT radius
 MATCH_R_RATIO = 1.6       # GT/pred radius ratio must lie within [1/x, x]
@@ -164,18 +164,20 @@ def _annotate_frame(frame: np.ndarray, gt: list[dict],
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--folder", default="data")
-    ap.add_argument("--annotations", default="annotations")
+    ap.add_argument("--batch", default=None,
+                    help="only score this batch (default: every batch)")
     ap.add_argument("--annotated-stills", default=None,
                     help="if set, write GT-vs-pred overlay PNGs to this dir")
     args = ap.parse_args()
 
+    migrate()
     spec = discover_grid(args.folder)
     wells_by_name = {w.folder_name: w for w in spec.wells}
 
-    ann_root = Path(args.annotations)
-    ann_files = sorted(ann_root.rglob("*.json"))
-    if not ann_files:
-        raise SystemExit(f"no annotations found under {ann_root}/")
+    annotations = repo.list_annotations(args.batch)
+    if not annotations:
+        raise SystemExit("no annotations in the database — see "
+                         "scripts/import_annotations.py")
 
     out_dir = Path(args.annotated_stills) if args.annotated_stills else None
     if out_dir:
@@ -184,8 +186,7 @@ def main() -> None:
     scores: list[FrameScore] = []
     print(f"{'well':22s} {'t':10s} {'GT':>3s} {'P':>3s} {'TP':>3s} {'FP':>3s} {'FN':>3s} "
           f"{'prec':>5s} {'rec':>5s} {'★rec':>5s} {'Δc':>5s} {'Δr':>5s}")
-    for f in ann_files:
-        ann = json.loads(f.read_text())
+    for ann in annotations:
         well_name = ann["well"]
         label = ann["label"]
         well = wells_by_name.get(well_name)

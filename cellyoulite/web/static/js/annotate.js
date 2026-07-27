@@ -31,8 +31,11 @@ async function loadGrid() {
   wellSel.innerHTML = '';
   for (const w of wells) {
     const opt = document.createElement('option');
-    opt.value = w.mount_id + '|' + w.folder_name;
-    opt.textContent = w.folder_name;
+    opt.value = [w.mount_id, w.batch, w.folder_name].join('|');
+    // Well names repeat across batches, so name the batch in the list.
+    opt.textContent = `${w.batch} · ${w.folder_name}`;
+    opt.dataset.batch = w.batch;
+    opt.dataset.folder = w.folder_name;
     wellSel.appendChild(opt);
   }
   // Fire-and-forget alignment warm-up; wells whose cache is already valid
@@ -58,8 +61,9 @@ async function warmAlignments() {
 
 async function loadWell() {
   if (!wellSel.value) return;
-  const [mid, folder] = wellSel.value.split('|');
-  const r = await fetch(`/api/well?mount_id=${encodeURIComponent(mid)}&folder_name=${encodeURIComponent(folder)}`);
+  const [mid, batch, folder] = wellSel.value.split('|');
+  const r = await fetch(`/api/well?mount_id=${encodeURIComponent(mid)}`
+    + `&batch=${encodeURIComponent(batch)}&folder_name=${encodeURIComponent(folder)}`);
   const data = await r.json();
   timepoints = data.timepoints || [];
   tpSel.innerHTML = '';
@@ -107,15 +111,22 @@ async function loadFrame() {
   };
 }
 
+// Annotations are stored per batch + well + frame.
+function annUrl(k) {
+  return `/api/annotations?batch=${encodeURIComponent(k.batch)}`
+       + `&well=${encodeURIComponent(k.well)}&label=${encodeURIComponent(k.label)}`;
+}
+
 function annotationKey() {
   const wopt = wellSel.options[wellSel.selectedIndex];
   const topt = tpSel.options[tpSel.selectedIndex];
-  return { well: wopt.textContent, label: topt.dataset.label };
+  return { batch: wopt.dataset.batch, well: wopt.dataset.folder,
+           label: topt.dataset.label };
 }
 
 async function loadAnnotations() {
   const k = annotationKey();
-  const r = await fetch(`/api/annotations?well=${encodeURIComponent(k.well)}&label=${encodeURIComponent(k.label)}`);
+  const r = await fetch(annUrl(k));
   const data = await r.json();
   circles = data.circles || [];
   setStatus(`${circles.length} loaded`, false);
@@ -124,7 +135,7 @@ async function loadAnnotations() {
 async function saveAnnotations() {
   const k = annotationKey();
   const aligned = alignedBox.checked ? 1 : 0;
-  const r = await fetch(`/api/annotations?well=${encodeURIComponent(k.well)}&label=${encodeURIComponent(k.label)}&aligned=${aligned}`, {
+  const r = await fetch(`${annUrl(k)}&aligned=${aligned}`, {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({circles, key: currentKey, image_w: imgW, image_h: imgH}),
@@ -298,7 +309,8 @@ copyFromSel.addEventListener('change', async () => {
     return;
   }
   const wopt = wellSel.options[wellSel.selectedIndex];
-  const r = await fetch(`/api/annotations?well=${encodeURIComponent(wopt.textContent)}&label=${encodeURIComponent(opt.dataset.label)}`);
+  const r = await fetch(annUrl({batch: wopt.dataset.batch, well: wopt.dataset.folder,
+                                label: opt.dataset.label}));
   const data = await r.json();
   const incoming = data.circles || [];
   // Deep copy so editing the new ones doesn't write through to anything.
@@ -337,7 +349,7 @@ window.addEventListener('beforeunload', (e) => {
   const k = annotationKey();
   const payload = JSON.stringify({circles, key: currentKey, image_w: imgW, image_h: imgH});
   navigator.sendBeacon(
-    `/api/annotations?well=${encodeURIComponent(k.well)}&label=${encodeURIComponent(k.label)}`,
+    annUrl(k),
     new Blob([payload], {type: 'application/json'}),
   );
 });

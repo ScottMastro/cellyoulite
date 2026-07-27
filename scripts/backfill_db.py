@@ -1,15 +1,17 @@
 """One-shot importer: existing JSON files -> SQLite. Idempotent / re-runnable.
 
-Run from the project root (where data/, tracks/, .align_cache/ live):
+Reads the pre-batch *flat* layout (tracks/<well>.json, data/<well>/), so it
+imports one batch at a time and needs to be told which:
 
-    python scripts/backfill_db.py
+    python scripts/backfill_db.py --batch "CA1 T1"
 
-Reproducible caches (alignment, tracks, detections) are upserted. Authored
-curation (track filters, well sign-off, users) is inserted only if absent, so
-re-running never clobbers decisions made after the first import.
+Reproducible caches (alignment, organoids, detections) are upserted. Authored
+curation (organoid filters, well sign-off, users) is inserted only if absent,
+so re-running never clobbers decisions made after the first import.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import os
 from datetime import datetime, timezone
@@ -35,9 +37,20 @@ def _data_dir() -> Path:
 
 
 def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--batch", required=True,
+                    help='batch these wells belong to, e.g. "CA1 T1"')
+    args = ap.parse_args()
+    batch = args.batch
+
     migrate()
     conn = connect()
     try:
+        conn.execute("INSERT INTO batch(name,created_at) VALUES(?,?) "
+                     "ON CONFLICT(name) DO NOTHING", (batch, _now()))
+        batch_id = conn.execute("SELECT id FROM batch WHERE name=?",
+                                (batch,)).fetchone()["id"]
+
         # ---- wells (treatment/replicate from the grid where available) ----
         meta: dict[str, tuple] = {}  # folder_name -> (treatment, replicate, paths)
         ddir = _data_dir()
@@ -52,12 +65,14 @@ def main() -> None:
         for name in sorted(names):
             tr, rep, _ = meta.get(name, (None, None, None))
             conn.execute(
-                "INSERT INTO well(folder_name,treatment,replicate,first_seen) VALUES(?,?,?,?) "
-                "ON CONFLICT(folder_name) DO UPDATE SET treatment=excluded.treatment, "
-                "replicate=excluded.replicate",
-                (name, tr, rep, _now()))
+                "INSERT INTO well(batch_id,folder_name,treatment,replicate,first_seen) "
+                "VALUES(?,?,?,?,?) "
+                "ON CONFLICT(batch_id,folder_name) DO UPDATE SET "
+                "treatment=excluded.treatment, replicate=excluded.replicate",
+                (batch_id, name, tr, rep, _now()))
         conn.commit()
-        well_id = {r["folder_name"]: r["id"] for r in conn.execute("SELECT id, folder_name FROM well")}
+        well_id = {r["folder_name"]: r["id"] for r in conn.execute(
+            "SELECT id, folder_name FROM well WHERE batch_id=?", (batch_id,))}
 
         # ---- alignment (per well, only if a cache file is present) ----
         for name, (_, _, paths) in meta.items():

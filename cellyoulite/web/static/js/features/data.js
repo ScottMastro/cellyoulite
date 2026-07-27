@@ -9,12 +9,35 @@ function updateDlCount() {
   $("dl-count").textContent = `${n} selected`;
 }
 
+// Everything on this card reads or writes one batch. Use the grid's selection
+// when there is one, otherwise ask — importing a new dataset is exactly the
+// case where the batch does not exist yet.
+function askBatch(prompt) {
+  if (state.batch) return state.batch;
+  if (state.batches.length === 1) return state.batches[0];
+  const answer = window.prompt(prompt, "");
+  const name = (answer || "").trim();
+  if (name && (name.includes("/") || name.startsWith("."))) {
+    $("data-status").textContent = "batch name can't contain / or start with .";
+    return null;
+  }
+  return name || null;
+}
+
 // subset image-download picker (experiments grouped by treatment)
 function openDownloadModal() {
-  const wells = (state.grid && state.grid.wells) || [];
+  const batch = askBatch("Download images from which batch?");
+  if (!batch) return;
+  const all = (state.grid && state.grid.wells) || [];
+  const wells = all.filter(w => w.batch === batch);
   if (!wells.length) { $("data-status").textContent = "no experiments to download yet"; return; }
+  $("dl-modal").dataset.batch = batch;
   const byTreat = {};
-  for (const w of wells) (byTreat[w.treatment] ||= []).push(w.folder_name);
+  // Download works on source directories, and several wells can share one.
+  for (const w of wells) {
+    const dir = w.source_dir || w.folder_name;
+    if (!(byTreat[w.treatment] ||= []).includes(dir)) byTreat[w.treatment].push(dir);
+  }
   $("dl-list").innerHTML = Object.keys(byTreat).sort().map(tr => {
     const items = byTreat[tr].sort().map(fn =>
       `<label class="dl-item"><input type="checkbox" value="${escapeHtml(fn)}"> ${escapeHtml(fn)}</label>`
@@ -44,16 +67,19 @@ export function initData() {
     const st = $("data-status");
     const imgs = files.filter(f => /\.(tif|tiff|png|jpe?g|bmp)$/i.test(f.name));
     if (!imgs.length) { st.textContent = "no image files in that folder"; return; }
-    st.textContent = `uploading ${imgs.length} image(s)…`;
+    const batch = askBatch("Add these images to which batch? (name a new one to create it)");
+    if (!batch) { st.textContent = "upload cancelled — no batch chosen"; return; }
+    st.textContent = `uploading ${imgs.length} image(s) to ${batch}…`;
     const fd = new FormData();
     // 3rd arg keeps the relative path so the server can route by experiment name.
     for (const f of imgs) fd.append("files", f, f.webkitRelativePath || f.name);
     try {
-      const r = await fetch("/api/upload-images", { method: "POST", body: fd });
+      const r = await fetch(`/api/upload-images?batch=${encodeURIComponent(batch)}`,
+                            { method: "POST", body: fd });
       const d = await r.json();
       if (!r.ok) { st.textContent = `error: ${d.detail || r.statusText}`; return; }
       st.textContent = `added ${d.n_files} image(s) to ${d.n_experiments} experiment(s)`
-        + (d.skipped ? ` · skipped ${d.skipped}` : "");
+        + ` in ${d.batch}` + (d.skipped ? ` · skipped ${d.skipped}` : "");
       await refreshAll();
     } catch (err) { st.textContent = `error: ${err}`; }
   };
@@ -63,19 +89,21 @@ export function initData() {
     e.target.value = "";
     if (!file) return;
     const st = $("data-status");
-    st.textContent = `importing ${file.name}…`;
+    const batch = askBatch("Import these results into which batch? (name a new one to create it)");
+    if (!batch) { st.textContent = "import cancelled — no batch chosen"; return; }
+    st.textContent = `importing ${file.name} into ${batch}…`;
     try {
-      const r = await fetch("/api/bundle-import", {
+      const r = await fetch(`/api/bundle-import?batch=${encodeURIComponent(batch)}`, {
         method: "POST",
         headers: { "Content-Type": "application/gzip" },
         body: file,
       });
       const d = await r.json();
       if (!r.ok) { st.textContent = `error: ${d.detail || r.statusText}`; return; }
-      const ex = d.updated_experiments || [];
-      st.textContent = ex.length
-        ? `merged results for ${ex.length} experiment(s): ${ex.join(", ")}`
-        : "imported (no experiments detected in bundle)";
+      st.textContent = d.db_tracks
+        ? `imported ${d.n_files} file(s) into ${d.batch}`
+          + ` · ${d.db_tracks} organoids, ${d.db_alignments} alignments`
+        : `imported ${d.n_files} file(s) into ${d.batch} (no organoids found)`;
       await refreshAll();
     } catch (err) { st.textContent = `error: ${err}`; }
   };
@@ -89,7 +117,9 @@ export function initData() {
   $("dl-go").onclick = () => {
     const chosen = [...$("dl-list").querySelectorAll(".dl-item input:checked")].map(c => c.value);
     if (!chosen.length) { $("dl-count").textContent = "select at least one"; return; }
-    const params = chosen.map(x => `exp=${encodeURIComponent(x)}`).join("&");
+    const batch = $("dl-modal").dataset.batch || "";
+    const params = [`batch=${encodeURIComponent(batch)}`]
+      .concat(chosen.map(x => `exp=${encodeURIComponent(x)}`)).join("&");
     window.location.href = `/api/download-images?${params}`;
     $("dl-modal").classList.add("hidden");
   };

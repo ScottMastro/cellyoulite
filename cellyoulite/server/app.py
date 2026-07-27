@@ -20,11 +20,18 @@ from starlette.requests import Request
 from cellyoulite.__version__ import __version__
 from cellyoulite.db import repo
 from cellyoulite.io.grid import (
-    discover_grid, is_experiment_folder, is_image_name,
+    discover_grid,
+    is_experiment_dir,
+    is_image_name,
 )
+from cellyoulite.io.ingest import ingest_batch
 from cellyoulite.pipeline.align import (
-    WellAlignment, compute_alignment_cached, is_alignment_cached, paste_onto_canvas,
-    _CACHE_VERSION, _fingerprint,
+    _CACHE_VERSION,
+    WellAlignment,
+    _fingerprint,
+    compute_alignment_cached,
+    is_alignment_cached,
+    paste_onto_canvas,
 )
 
 _WEB = Path(__file__).resolve().parent.parent / "web"
@@ -91,14 +98,22 @@ def _mount_by_id(mid: str) -> dict:
 
 
 # ---------------------- key plumbing ----------------------
-# A "key" is "<mount_id>/<well_folder>/<filename>". The mount id is the first
-# segment; the remainder is the path within the mount.
+# A "key" is "<mount_id>/<batch>/<well_folder>/<filename>". The mount id is the
+# first segment; the remainder is the path within the mount, which starts with
+# the batch directory.
 
 def _split_key(key: str) -> tuple[dict, str]:
     if "/" not in key:
         raise HTTPException(status_code=400, detail="malformed key")
     mid, rest = key.split("/", 1)
     return _mount_by_id(mid), rest
+
+
+def _split_batch(rest: str) -> tuple[str, str]:
+    """"<batch>/<well_folder>/<file>" -> ("<batch>", "<well_folder>/<file>")."""
+    if "/" not in rest:
+        raise HTTPException(status_code=400, detail="malformed key")
+    return rest.split("/", 1)
 
 
 def _safe_image_path(key: str) -> Path:
@@ -112,35 +127,61 @@ def _safe_image_path(key: str) -> Path:
     return target
 
 
-def _wells_for_mount(mount: dict):
-    spec = discover_grid(Path(mount["path"]))
-    return spec
+def _batch_dirs(mount: dict) -> list[Path]:
+    """Immediate subdirectories of the mount, one per batch. The data folder is
+    organised as data/<batch>/<well folder>/<images>, so that two batches can
+    reuse a well folder name ("DMSO", "012") without colliding."""
+    root = Path(mount["path"])
+    if not root.is_dir():
+        return []
+    return sorted((p for p in root.iterdir()
+                   if p.is_dir() and not p.name.startswith(".")),
+                  key=lambda p: p.name)
 
 
-def _find_well(mount_id: str, folder_name: str):
+def _batches_for_mount(mount: dict) -> list[dict]:
+    """[{name, path, spec}] for every batch directory under the mount."""
+    out = []
+    for d in _batch_dirs(mount):
+        spec = discover_grid(d)
+        if spec.wells:
+            out.append({"name": d.name, "path": d, "spec": spec})
+    return out
+
+
+def _wells_for_batch(mount: dict, batch: str):
+    """The GridSpec for one batch under a mount."""
+    d = Path(mount["path"]) / batch
+    if not d.is_dir() or "/" in batch or batch.startswith("."):
+        raise HTTPException(status_code=404, detail=f"no such batch: {batch}")
+    return discover_grid(d)
+
+
+def _find_well(mount_id: str, batch: str, folder_name: str):
     mount = _mount_by_id(mount_id)
-    spec = _wells_for_mount(mount)
+    spec = _wells_for_batch(mount, batch)
     for w in spec.wells:
         if w.folder_name == folder_name:
             return mount, w
     raise HTTPException(status_code=404, detail="well not found")
 
 
-_align_cache: dict[tuple[str, str], WellAlignment] = {}
+# Keyed by (mount id, batch, well folder) — folder names repeat across batches.
+_align_cache: dict[tuple[str, str, str], WellAlignment] = {}
 
 
-def _well_alignment(mount: dict, well) -> WellAlignment:
+def _well_alignment(mount: dict, batch: str, well) -> WellAlignment:
     """Resolve a well's alignment, read-through the DB:
       in-memory cache → DB row (matching fingerprint+version) → compute.
     A compute (which uses the JSON disk cache when present) is persisted back
     to the DB so the ingested rows are the source of truth going forward.
     align.py stays DB-free, so the offline analysis tool is unaffected."""
-    cache_key = (mount["id"], well.folder_name)
+    cache_key = (mount["id"], batch, well.folder_name)
     if cache_key in _align_cache:
         return _align_cache[cache_key]
     paths = [tp.path for tp in well.timepoints]
     fp = _fingerprint(paths)
-    row = repo.get_alignment(well.folder_name)
+    row = repo.get_alignment(batch, well.folder_name)
     if row and row["fingerprint"] == fp and row["cache_version"] == _CACHE_VERSION:
         align = WellAlignment(
             offsets=tuple(tuple(o) for o in json.loads(row["offsets"])),
@@ -150,7 +191,7 @@ def _well_alignment(mount: dict, well) -> WellAlignment:
     else:
         align = compute_alignment_cached(paths)
         repo.set_alignment(
-            well.folder_name, fp, _CACHE_VERSION,
+            batch, well.folder_name, fp, _CACHE_VERSION,
             align.canvas_shape[0], align.canvas_shape[1],
             [list(o) for o in align.offsets], [list(p) for p in align.placements],
             treatment=well.treatment, replicate=well.replicate)
@@ -162,23 +203,26 @@ def _read_aligned(key: str) -> np.ndarray:
     """Read the image and pad it onto its well's union canvas."""
     img = imread(_safe_image_path(key))
     mount, rest = _split_key(key)
-    well_folder = rest.split("/", 1)[0] if "/" in rest else None
+    batch, inner_key = _split_batch(rest)
+    well_folder = inner_key.split("/", 1)[0] if "/" in inner_key else None
     if not well_folder:
         return img
-    spec = _wells_for_mount(mount)
-    well = next((w for w in spec.wells if w.folder_name == well_folder), None)
+    spec = _wells_for_batch(mount, batch)
+    # A well's images may sit in a directory shared with other positions, so
+    # match on the timepoint key rather than on the folder name.
+    well = next((w for w in spec.wells
+                 if any(tp.key == inner_key for tp in w.timepoints)), None)
     if well is None:
         return img
-    align = _well_alignment(mount, well)
-    inner_key = rest  # well_folder/filename — matches Timepoint.key from grid
+    align = _well_alignment(mount, batch, well)
     idx = next((i for i, tp in enumerate(well.timepoints) if tp.key == inner_key), None)
     if idx is None or not align.placements:
         return img
     return paste_onto_canvas(img, align.placements[idx], align.canvas_shape)
 
 
-def _prefixed_key(mount: dict, inner_key: str) -> str:
-    return f"{mount['id']}/{inner_key}"
+def _prefixed_key(mount: dict, batch: str, inner_key: str) -> str:
+    return f"{mount['id']}/{batch}/{inner_key}"
 
 
 # ---------------------- routes ----------------------
@@ -247,35 +291,65 @@ def create_user(body: dict = Body(...)) -> dict:
     return {"ok": True, "username": username, "users": repo.list_users(), "created": created}
 
 
+@app.get("/api/batches")
+def batches() -> dict:
+    """Every batch under the data folder, with how much each holds."""
+    out = []
+    for mount in _mounts():
+        for b in _batches_for_mount(mount):
+            out.append({
+                "mount_id": mount["id"],
+                "name": b["name"],
+                "n_wells": len(b["spec"].wells),
+                "n_images": b["spec"].n_images,
+                "treatments": b["spec"].treatments,
+            })
+    return {"batches": out}
+
+
 @app.get("/api/grid")
-def grid() -> dict:
-    """Walk every mount; return wells from all of them, merged."""
+def grid(batch: str | None = None) -> dict:
+    """Wells in one batch, or across every batch when none is named."""
     mounts = _mounts()
     if not mounts:
         return {"treatments": [], "replicates": [], "n_wells": 0, "n_images": 0,
-                "wells": [], "mounts": []}
+                "wells": [], "mounts": [], "batches": [], "batch_counts": {},
+                "batch": batch}
 
     wells: list[dict] = []
     treatments: set[str] = set()
     replicates: set[int] = set()
+    names: list[str] = []
+    # Every batch's size, regardless of the filter — the batch tabs show these,
+    # and they must not change as you click between them.
+    counts: dict[str, int] = {}
     n_images = 0
     for mount in mounts:
-        spec = _wells_for_mount(mount)
-        treatments.update(spec.treatments)
-        replicates.update(spec.replicates)
-        n_images += spec.n_images
-        for w in spec.wells:
-            thumb = w.timepoints[-1] if w.timepoints else None
-            wells.append({
-                "mount_id": mount["id"],
-                "mount_alias": mount["alias"],
-                "treatment": w.treatment,
-                "replicate": w.replicate,
-                "folder_name": w.folder_name,
-                "n_timepoints": len(w.timepoints),
-                "thumb_key": _prefixed_key(mount, thumb.key) if thumb else None,
-                "thumb_label": thumb.label if thumb else None,
-            })
+        for b in _batches_for_mount(mount):
+            names.append(b["name"])
+            counts[b["name"]] = len(b["spec"].wells)
+            if batch is not None and b["name"] != batch:
+                continue
+            spec = b["spec"]
+            treatments.update(spec.treatments)
+            replicates.update(spec.replicates)
+            n_images += spec.n_images
+            for w in spec.wells:
+                thumb = w.timepoints[-1] if w.timepoints else None
+                wells.append({
+                    "mount_id": mount["id"],
+                    "mount_alias": mount["alias"],
+                    "batch": b["name"],
+                    "treatment": w.treatment,
+                    "replicate": w.replicate,
+                    "folder_name": w.folder_name,
+                    "position": w.position,
+                    "source_dir": w.source_dir,
+                    "n_timepoints": len(w.timepoints),
+                    "thumb_key": _prefixed_key(mount, b["name"], thumb.key)
+                                 if thumb else None,
+                    "thumb_label": thumb.label if thumb else None,
+                })
 
     return {
         "treatments": sorted(treatments),
@@ -284,21 +358,27 @@ def grid() -> dict:
         "n_images": n_images,
         "wells": wells,
         "mounts": mounts,
+        "batches": names,
+        "batch_counts": counts,
+        "batch": batch,
     }
 
 
 @app.get("/api/well")
-def well(mount_id: str, folder_name: str) -> dict:
-    mount, w = _find_well(mount_id, folder_name)
+def well(mount_id: str, batch: str, folder_name: str) -> dict:
+    mount, w = _find_well(mount_id, batch, folder_name)
     return {
         "mount_id": mount["id"],
         "mount_alias": mount["alias"],
+        "batch": batch,
         "treatment": w.treatment,
         "replicate": w.replicate,
         "folder_name": w.folder_name,
+        "position": w.position,
+        "source_dir": w.source_dir,
         "timepoints": [
             {"t_idx": i, "minutes": tp.minutes, "label": tp.label,
-             "key": _prefixed_key(mount, tp.key)}
+             "key": _prefixed_key(mount, batch, tp.key)}
             for i, tp in enumerate(w.timepoints)
         ],
     }
@@ -364,9 +444,9 @@ def image(key: str, thumb: int = 0, aligned: int = 0) -> Response:
 
 
 @app.get("/api/well-align")
-def well_align(mount_id: str, folder_name: str) -> dict:
-    mount, w = _find_well(mount_id, folder_name)
-    align = _well_alignment(mount, w)
+def well_align(mount_id: str, batch: str, folder_name: str) -> dict:
+    mount, w = _find_well(mount_id, batch, folder_name)
+    align = _well_alignment(mount, batch, w)
     return {
         "canvas": list(align.canvas_shape),
         "offsets": [list(o) for o in align.offsets],
@@ -388,26 +468,28 @@ def warm_alignments() -> dict:
     n_recomputed = 0
     for mount in _mounts():
         try:
-            spec = _wells_for_mount(mount)
+            batches = _batches_for_mount(mount)
         except Exception as e:  # noqa: BLE001
             out.append({"mount": mount["alias"], "error": str(e)})
             continue
-        for w in spec.wells:
-            paths = [tp.path for tp in w.timepoints]
-            cached = is_alignment_cached(paths)
-            t0 = time.perf_counter()
-            align = compute_alignment_cached(paths)
-            elapsed_ms = int((time.perf_counter() - t0) * 1000)
-            _align_cache[(mount["id"], w.folder_name)] = align
-            if not cached:
-                n_recomputed += 1
-            out.append({
-                "mount": mount["alias"],
-                "well": w.folder_name,
-                "n_timepoints": len(paths),
-                "was_cached": cached,
-                "ms": elapsed_ms,
-            })
+        for b in batches:
+            for w in b["spec"].wells:
+                paths = [tp.path for tp in w.timepoints]
+                cached = is_alignment_cached(paths)
+                t0 = time.perf_counter()
+                align = compute_alignment_cached(paths)
+                elapsed_ms = int((time.perf_counter() - t0) * 1000)
+                _align_cache[(mount["id"], b["name"], w.folder_name)] = align
+                if not cached:
+                    n_recomputed += 1
+                out.append({
+                    "mount": mount["alias"],
+                    "batch": b["name"],
+                    "well": w.folder_name,
+                    "n_timepoints": len(paths),
+                    "was_cached": cached,
+                    "ms": elapsed_ms,
+                })
     return {"n_wells": len(out), "n_recomputed": n_recomputed, "wells": out}
 
 
@@ -420,12 +502,28 @@ _CELLPOSE_CACHE_ROOT = Path.cwd() / ".cellpose_cache"
 _EDGES_CACHE_ROOT = Path.cwd() / ".edges_cache"
 
 
-def _cellpose_done_labels(well_folder: str) -> set[str]:
+def _safe_name(name: str) -> str:
+    """A path segment that can't escape its parent."""
+    return name.replace("/", "_")
+
+
+def _scoped(root: Path, batch: str, *parts: str) -> Path:
+    """Result caches live under <root>/<batch>/..., mirroring data/<batch>/.
+
+    Well folder names repeat across batches ("DMSO r1" exists in both), so a
+    flat per-well layout would have one batch silently overwrite another's
+    tracks, masks and stitches."""
+    p = root / _safe_name(batch)
+    for part in parts:
+        p = p / _safe_name(part)
+    return p
+
+
+def _cellpose_done_labels(batch: str, well_folder: str) -> set[str]:
     """A frame is 'done' only when BOTH the circles JSON and the mask PNG
     sidecar are present. Older runs (JSON-only) get re-processed by the
     batch script and shouldn't be reported as complete."""
-    safe = well_folder.replace("/", "_")
-    d = _CELLPOSE_CACHE_ROOT / safe
+    d = _scoped(_CELLPOSE_CACHE_ROOT, batch, well_folder)
     if not d.is_dir():
         return set()
     done = set()
@@ -438,6 +536,12 @@ def _cellpose_done_labels(well_folder: str) -> set[str]:
 # ---------------------- tracking ----------------------
 
 _TRACKS_ROOT = Path.cwd() / "tracks"
+
+
+def _tracks_json(batch: str, well_folder: str) -> Path:
+    """tracks/<batch>/<well>.json — the per-well organoid trajectories."""
+    return _scoped(_TRACKS_ROOT, batch, f"{_safe_name(well_folder)}.json")
+
 # Downscaled JPEG thumbnails of the per-organoid stitch strips, for the list
 # rows (cached on disk, keyed by the source strip's mtime so it self-invalidates
 # when a strip is re-rendered).
@@ -456,38 +560,43 @@ def track_status() -> dict:
     after the tracks file was written, the well counts as stale."""
     rows = []
     n_total = 0; n_done = 0
-    hv = repo.human_validated_map()   # one query for all wells (polled often)
     for mount in _mounts():
         try:
-            spec = _wells_for_mount(mount)
+            batches = _batches_for_mount(mount)
         except Exception:  # noqa: BLE001
             continue
-        for w in spec.wells:
-            safe = w.folder_name.replace("/", "_")
-            track_path = _TRACKS_ROOT / f"{safe}.json"
-            cache_dir = _CELLPOSE_CACHE_ROOT / safe
-            track_mtime = track_path.stat().st_mtime if track_path.is_file() else None
-            stale = False
-            if track_mtime is not None and cache_dir.is_dir():
-                for f in cache_dir.glob("*.json"):
-                    if f.stat().st_mtime > track_mtime:
-                        stale = True; break
-            done = track_mtime is not None and not stale
-            rows.append({
-                "mount_id": mount["id"],
-                "folder_name": w.folder_name,
-                "done": done,
-                "stale": stale,
-                "human_validated": hv.get(w.folder_name, False),
-            })
-            n_total += 1
-            n_done += 1 if done else 0
+        for b in batches:
+            # One query per batch for all its wells (this endpoint is polled).
+            hv = repo.human_validated_map(b["name"])
+            for w in b["spec"].wells:
+                track_path = _tracks_json(b["name"], w.folder_name)
+                cache_dir = _scoped(_CELLPOSE_CACHE_ROOT, b["name"], w.folder_name)
+                track_mtime = track_path.stat().st_mtime if track_path.is_file() else None
+                stale = False
+                if track_mtime is not None and cache_dir.is_dir():
+                    for f in cache_dir.glob("*.json"):
+                        if f.stat().st_mtime > track_mtime:
+                            stale = True; break
+                done = track_mtime is not None and not stale
+                rows.append({
+                    "mount_id": mount["id"],
+                    "batch": b["name"],
+                    "folder_name": w.folder_name,
+                    "done": done,
+                    "stale": stale,
+                    "human_validated": hv.get(w.folder_name, False),
+                })
+                n_total += 1
+                n_done += 1 if done else 0
     return {"wells": rows, "n_total": n_total, "n_done": n_done}
 
 
 @app.post("/api/track-run")
 def track_run(min_frac: float = 0.75) -> dict:
-    import subprocess, sys, threading, time as _t
+    import subprocess
+    import sys
+    import threading
+    import time as _t
     global _track_job_lock
     if _track_job_lock is None:
         _track_job_lock = threading.Lock()
@@ -550,35 +659,35 @@ def track_job() -> dict:
 
 # Validation (track filters + well sign-off) lives in the DB; this helper reads
 # it so every consumer (grid, growth, boxplot, CSV) sees the same source.
-def _load_validation(well_folder: str) -> dict[int, bool]:
-    return repo.get_validation(well_folder)["overrides"]
+def _load_validation(batch: str, well_folder: str) -> dict[int, bool]:
+    return repo.get_validation(batch, well_folder)["overrides"]
 
 
-def _load_tracks(folder_name: str) -> dict | None:
-    """A well's tracks + detections from the DB (the source of truth since the
-    analysis-result ingestion). Returns the tracks-JSON shape, or None when the
-    well has no tracks in the DB."""
-    return repo.get_tracks(folder_name)
+def _load_tracks(batch: str, folder_name: str) -> dict | None:
+    """A well's organoids + detections from the DB (the source of truth since
+    the analysis-result ingestion). Returns the tracks-JSON shape, or None when
+    the well has none in the DB."""
+    return repo.get_tracks(batch, folder_name)
 
 
 @app.get("/api/track-validation")
-def get_track_validation(mount_id: str, folder_name: str) -> dict:
-    """Manual user overrides on whether a track is valid for analysis.
-    Maps track_id -> bool (true=accepted, false=rejected). Auto-classified
-    tracks fall back to their script-assigned `valid` field if no override.
+def get_track_validation(mount_id: str, batch: str, folder_name: str) -> dict:
+    """Manual user overrides on whether an organoid is valid for analysis.
+    Maps id -> bool (true=accepted, false=rejected). Auto-classified organoids
+    fall back to their script-assigned `valid` field if no override.
     Also returns `human_validated` — whether a human has signed off on the
     whole well via the Validate button."""
-    state = repo.get_validation(folder_name)
-    return {"well": folder_name,
+    state = repo.get_validation(batch, folder_name)
+    return {"batch": batch, "well": folder_name,
             "overrides": {str(k): v for k, v in state["overrides"].items()},
             "human_validated": state["human_validated"]}
 
 
 @app.post("/api/track-validation")
-def set_track_validation(mount_id: str, folder_name: str,
+def set_track_validation(mount_id: str, batch: str, folder_name: str,
                           body: dict = Body(...)) -> dict:
     """Update the validation state for a well. Body may contain:
-      - overrides: {id: bool}  → replaces the per-track override map
+      - overrides: {id: bool}  → replaces the per-organoid override map
       - human_validated: bool   → flips the well-level sign-off
       - user: str               → who is making the decision (provenance)
 
@@ -591,20 +700,21 @@ def set_track_validation(mount_id: str, folder_name: str,
                 cleaned[int(k)] = bool(v)
             except (TypeError, ValueError):
                 continue
-        repo.set_overrides(folder_name, cleaned, decided_by)
+        repo.set_overrides(batch, folder_name, cleaned, decided_by)
     if "human_validated" in body:
-        repo.set_human_validated(folder_name, bool(body["human_validated"]), decided_by)
-    state = repo.get_validation(folder_name)
+        repo.set_human_validated(batch, folder_name,
+                                 bool(body["human_validated"]), decided_by)
+    state = repo.get_validation(batch, folder_name)
     return {"ok": True,
             "n_overrides": len(state["overrides"]),
             "human_validated": state["human_validated"]}
 
 
 @app.get("/api/tracks")
-def tracks_for_well(mount_id: str, folder_name: str) -> dict:
-    """The full tracks payload for one well (DB-backed — the ingested analysis
-    results), used by the viewer to colour overlays. Includes per-track stars."""
-    data = _load_tracks(folder_name)
+def tracks_for_well(mount_id: str, batch: str, folder_name: str) -> dict:
+    """The full organoid payload for one well (DB-backed — the ingested
+    analysis results), used by the viewer to colour overlays. Includes stars."""
+    data = _load_tracks(batch, folder_name)
     if data is None:
         return {"available": False, "tracks": [], "n_frames": 0}
     data["available"] = True
@@ -612,44 +722,35 @@ def tracks_for_well(mount_id: str, folder_name: str) -> dict:
 
 
 @app.post("/api/track-star")
-def set_track_star(mount_id: str, folder_name: str, track_id: int,
+def set_track_star(mount_id: str, batch: str, folder_name: str, track_id: int,
                    body: dict = Body(...)) -> dict:
-    """Toggle a track-level star ("a really good exemplar"), recording who
+    """Toggle an organoid-level star ("a really good exemplar"), recording who
     starred it and when."""
     by = (body.get("user") or "").strip() or "unknown"
     starred = bool(body.get("starred"))
-    repo.set_star(folder_name, track_id, starred, by)
+    repo.set_star(batch, folder_name, track_id, starred, by)
     return {"ok": True, "track_id": track_id, "starred": starred}
 
 
-def _stitch_thumb(cached: Path, folder_name: str, track_id: int,
+def _stitch_thumb(cached: Path, batch: str, folder_name: str, track_id: int,
                   variant: str, thumb: int) -> Response:
     """Serve a small JPEG of a cached stitch strip, downscaled to `thumb` px
-    tall. Cached on disk and keyed by the source strip's mtime."""
-    mtime = cached.stat().st_mtime_ns
-    tag = hashlib.sha1(f"{folder_name}|{track_id}|{variant}|{thumb}|{mtime}".encode()).hexdigest()
+    tall. Cached on disk and keyed by the source strip's mtime.
+
+    scripts/restitch.py writes these ahead of time using the same key, so a
+    warmed instance never renders one during a request."""
+    from cellyoulite.pipeline.track_stitch import thumb_tag, write_thumb
+    tag = thumb_tag(batch, folder_name, track_id, variant, thumb,
+                    cached.stat().st_mtime_ns)
     tpath = _STITCH_THUMB_ROOT / f"{tag}.jpg"
-    if not tpath.is_file():
-        arr = cv2.imread(str(cached), cv2.IMREAD_COLOR)
-        if arr is None:
-            return FileResponse(cached, media_type="image/png")
-        h, w = arr.shape[:2]
-        if h > thumb:
-            arr = cv2.resize(arr, (max(1, round(w * thumb / h)), thumb),
-                             interpolation=cv2.INTER_AREA)
-        ok, buf = cv2.imencode(".jpg", arr, [int(cv2.IMWRITE_JPEG_QUALITY), 82])
-        if not ok:
-            return FileResponse(cached, media_type="image/png")
-        _STITCH_THUMB_ROOT.mkdir(parents=True, exist_ok=True)
-        tmp = tpath.with_suffix(".jpg.tmp")
-        tmp.write_bytes(buf.tobytes())
-        tmp.replace(tpath)
+    if not tpath.is_file() and not write_thumb(cached, tpath, thumb):
+        return FileResponse(cached, media_type="image/png")
     return FileResponse(tpath, media_type="image/jpeg",
                         headers={"Cache-Control": "public, max-age=86400"})
 
 
 @app.get("/api/track-stitch")
-def track_stitch(mount_id: str, folder_name: str, track_id: int,
+def track_stitch(mount_id: str, batch: str, folder_name: str, track_id: int,
                   variant: str = "both", pad: float = 1.4, thumb: int = 0) -> Response:
     """For one track, crop a square region around its centre in every frame
     where it appears and concatenate horizontally into a wide PNG.
@@ -661,42 +762,41 @@ def track_stitch(mount_id: str, folder_name: str, track_id: int,
     for list rows — the full-res strip is ~0.5 MB, far too big at row size."""
     if variant not in ("raw", "seg", "diff", "shape", "both"):
         raise HTTPException(status_code=400, detail="variant must be raw/seg/diff/shape/both")
-    safe = folder_name.replace("/", "_")
-    cached = _TRACKS_ROOT / safe / f"track_{track_id}_{variant}.png"
+    cached = _scoped(_TRACKS_ROOT, batch, folder_name,
+                     f"track_{track_id}_{variant}.png")
     # Small JPEG thumbnail for the organoid list (only when the full-res strip is
     # cached — otherwise fall through and render/serve full-res).
     if thumb and thumb > 0 and cached.is_file():
-        return _stitch_thumb(cached, folder_name, track_id, variant, int(thumb))
+        return _stitch_thumb(cached, batch, folder_name, track_id, variant, int(thumb))
     if cached.is_file() and variant in ("raw", "seg", "diff", "shape", "both"):
         return FileResponse(cached, media_type="image/png")
 
-    _, well = _find_well(mount_id, folder_name)
-    data = _load_tracks(folder_name)
+    mount, well = _find_well(mount_id, batch, folder_name)
+    data = _load_tracks(batch, folder_name)
     if data is None:
-        raise HTTPException(status_code=404, detail="no tracks for well")
+        raise HTTPException(status_code=404, detail="no organoids for well")
     track = next((t for t in data.get("tracks", []) if t["id"] == track_id), None)
     if track is None:
-        raise HTTPException(status_code=404, detail=f"no track {track_id}")
+        raise HTTPException(status_code=404, detail=f"no organoid {track_id}")
     dets = track.get("detections", [])
     if not dets:
-        raise HTTPException(status_code=404, detail="track has no detections")
+        raise HTTPException(status_code=404, detail="organoid has no detections")
 
     # Use the shared renderer (same code path the tracking script uses to
     # cache stitches). Replaces the inline implementation below.
-    safe_well = well.folder_name.replace("/", "_")
-
     def _load_frame(label: str):
         tp = next((t for t in well.timepoints if t.label == label), None)
         if tp is None:
             return None
-        key = f"{mount_id}/{well.folder_name}/{tp.path.name}"
+        # tp.key carries the true path within the batch — several wells can
+        # share one directory, so folder_name must not be used to rebuild it.
         try:
-            return _read_aligned(key)
+            return _read_aligned(_prefixed_key(mount, batch, tp.key))
         except HTTPException:
             return None
 
     def _load_mask(label: str):
-        p = _CELLPOSE_CACHE_ROOT / safe_well / f"{label}.mask.png"
+        p = _scoped(_CELLPOSE_CACHE_ROOT, batch, folder_name, f"{label}.mask.png")
         if not p.is_file():
             return None
         return cv2.imread(str(p), cv2.IMREAD_UNCHANGED)
@@ -708,41 +808,52 @@ def track_stitch(mount_id: str, folder_name: str, track_id: int,
     )
     if not strips:
         raise HTTPException(status_code=404, detail="no panels rendered")
+
+    # Persist what we just rendered. The tracking script only caches strips for
+    # organoids it considered valid, so every rejected one was re-rendering on
+    # each view — ~0.3 s of image work per row, repeated forever.
+    cached.parent.mkdir(parents=True, exist_ok=True)
+    tmp = cached.with_suffix(".png.tmp")
+    tmp.write_bytes(strips[variant])
+    tmp.replace(cached)                      # atomic publish
+
+    # The list rows are 88 px tall, so honour `thumb` here too. It used to
+    # apply only on a cache hit, meaning a miss shipped the full-resolution
+    # strip (~0.5 MB) to fill a thumbnail.
+    if thumb and thumb > 0:
+        return _stitch_thumb(cached, batch, folder_name, track_id, variant, int(thumb))
     return Response(content=strips[variant], media_type="image/png")
 
 
 @app.get("/api/track-gif")
-def track_gif(mount_id: str, folder_name: str, track_id: int,
+def track_gif(mount_id: str, batch: str, folder_name: str, track_id: int,
                variant: str = "seg", fps: int = 4, pad: float = 1.4) -> Response:
-    """Animated GIF of one track: each detection is a single frame, cropped
-    to the track's largest size and (when variant=seg) tinted with the
-    track's hue."""
+    """Animated GIF of one organoid: each detection is a single frame, cropped
+    to the organoid's largest size and (when variant=seg) tinted with its hue."""
     if variant not in ("raw", "seg"):
         raise HTTPException(status_code=400, detail="variant must be raw or seg")
-    _, well = _find_well(mount_id, folder_name)
-    safe = folder_name.replace("/", "_")
-    data = _load_tracks(folder_name)
+    mount, well = _find_well(mount_id, batch, folder_name)
+    data = _load_tracks(batch, folder_name)
     if data is None:
-        raise HTTPException(status_code=404, detail="no tracks for well")
+        raise HTTPException(status_code=404, detail="no organoids for well")
     track = next((t for t in data.get("tracks", []) if t["id"] == track_id), None)
     if track is None:
-        raise HTTPException(status_code=404, detail=f"no track {track_id}")
+        raise HTTPException(status_code=404, detail=f"no organoid {track_id}")
     dets = track.get("detections", [])
     if not dets:
-        raise HTTPException(status_code=404, detail="track has no detections")
+        raise HTTPException(status_code=404, detail="organoid has no detections")
 
     def _load_frame(label: str):
         tp = next((t for t in well.timepoints if t.label == label), None)
         if tp is None:
             return None
-        key = f"{mount_id}/{well.folder_name}/{tp.path.name}"
         try:
-            return _read_aligned(key)
+            return _read_aligned(_prefixed_key(mount, batch, tp.key))
         except HTTPException:
             return None
 
     def _load_mask(label: str):
-        p = _CELLPOSE_CACHE_ROOT / safe / f"{label}.mask.png"
+        p = _scoped(_CELLPOSE_CACHE_ROOT, batch, folder_name, f"{label}.mask.png")
         if not p.is_file():
             return None
         return cv2.imread(str(p), cv2.IMREAD_UNCHANGED)
@@ -758,13 +869,32 @@ def track_gif(mount_id: str, folder_name: str, track_id: int,
         raise HTTPException(status_code=404, detail="no frames")
     headers = {
         "Content-Disposition":
-            f'attachment; filename="{safe}_track_{track_id}_{variant}.gif"'
+            f'attachment; filename="{_safe_name(batch)}_{_safe_name(folder_name)}'
+            f'_organoid_{track_id}_{variant}.gif"'
     }
     return Response(content=buf, media_type="image/gif", headers=headers)
 
 
+def _select_wells(treatment: str | None, batch: str | None) -> list[tuple[str, object]]:
+    """[(batch_name, Well)] across every batch, optionally filtered. Analysis
+    endpoints pool wells, so each one has to stay tagged with its batch."""
+    out: list[tuple[str, object]] = []
+    for mount in _mounts():
+        try:
+            batches = _batches_for_mount(mount)
+        except Exception:  # noqa: BLE001
+            continue
+        for b in batches:
+            if batch is not None and b["name"] != batch:
+                continue
+            for w in b["spec"].wells:
+                if treatment is None or w.treatment == treatment:
+                    out.append((b["name"], w))
+    return out
+
+
 @app.get("/api/growth-csv")
-def growth_csv(treatment: str | None = None) -> Response:
+def growth_csv(treatment: str | None = None, batch: str | None = None) -> Response:
     """Long-format CSV of every accepted track-frame observation, suitable
     for loading into R as `read.csv(...)`.
 
@@ -776,29 +906,21 @@ def growth_csv(treatment: str | None = None) -> Response:
     import io
     import math
 
-    spec_wells: list = []
-    for mount in _mounts():
-        try:
-            spec = _wells_for_mount(mount)
-        except Exception:  # noqa: BLE001
-            continue
-        for w in spec.wells:
-            if treatment is None or w.treatment == treatment:
-                spec_wells.append(w)
+    spec_wells = _select_wells(treatment, batch)
 
     buf = io.StringIO()
     writer = csv.writer(buf, lineterminator="\n")
     writer.writerow([
-        "treatment", "replicate", "well", "track_id",
+        "batch", "treatment", "replicate", "well", "track_id",
         "valid_auto", "accepted",
         "t_idx", "minutes", "label",
         "area_px", "area_px_t0", "log2_fold",
     ])
-    for w in spec_wells:
-        data = _load_tracks(w.folder_name)
+    for b, w in spec_wells:
+        data = _load_tracks(b, w.folder_name)
         if data is None:
             continue
-        overrides = _load_validation(w.folder_name)
+        overrides = _load_validation(b, w.folder_name)
         tp_minutes = {tp.label: tp.minutes for tp in w.timepoints}
         for tr in data.get("tracks", []):
             valid_auto = bool(tr.get("valid"))
@@ -819,7 +941,7 @@ def growth_csv(treatment: str | None = None) -> Response:
                 if mn is None or not ap:
                     continue
                 writer.writerow([
-                    w.treatment, w.replicate, w.folder_name, tr["id"],
+                    b, w.treatment, w.replicate, w.folder_name, tr["id"],
                     "TRUE" if valid_auto else "FALSE",
                     "TRUE" if accepted else "FALSE",
                     d.get("t_idx", ""), int(mn), d["label"],
@@ -837,22 +959,15 @@ def growth_csv(treatment: str | None = None) -> Response:
 
 @app.get("/api/boxplot-data")
 def boxplot_data(treatment: str | None = None, by_replicate: int = 0,
-                 stars_only: int = 0) -> dict:
-    """Pool every accepted track from every replicate of each requested
+                 stars_only: int = 0, batch: str | None = None) -> dict:
+    """Pool every accepted organoid from every replicate of each requested
     treatment, normalise to log2(area / area@t0), and return per-treatment
     per-timepoint box statistics. When by_replicate=1, replicates are kept
-    as separate series within each treatment."""
+    as separate series within each treatment. Pass `batch` to keep one batch's
+    wells out of another's pool — treatment names repeat across batches."""
     import math
 
-    spec_wells: list = []
-    for mount in _mounts():
-        try:
-            spec = _wells_for_mount(mount)
-        except Exception:  # noqa: BLE001
-            continue
-        for w in spec.wells:
-            if treatment is None or w.treatment == treatment:
-                spec_wells.append(w)
+    spec_wells = _select_wells(treatment, batch)
     if not spec_wells:
         return {"treatments": [], "boxes": [], "minutes": [], "replicates": []}
 
@@ -860,13 +975,16 @@ def boxplot_data(treatment: str | None = None, by_replicate: int = 0,
     bucket: dict[tuple, dict[int, list[float]]] = {}
     minutes_seen: set[int] = set()
 
-    for w in spec_wells:
-        data = _load_tracks(w.folder_name)
+    for b, w in spec_wells:
+        data = _load_tracks(b, w.folder_name)
         if data is None:
             continue
-        overrides = _load_validation(w.folder_name)
+        overrides = _load_validation(b, w.folder_name)
         tp_minutes = {tp.label: tp.minutes for tp in w.timepoints}
-        key = (w.treatment, w.replicate if by_replicate else None)
+        # Batch is part of the key: the same treatment name exists in more
+        # than one batch, and pooling them would average two different
+        # experiments — which also have different time axes.
+        key = (b, w.treatment, w.replicate if by_replicate else None)
         for tr in data.get("tracks", []):
             accepted = overrides.get(tr["id"], bool(tr.get("valid")))
             if not accepted:
@@ -910,8 +1028,10 @@ def boxplot_data(treatment: str | None = None, by_replicate: int = 0,
     boxes = []
     treatments_set: set[str] = set()
     replicates_set: set[int] = set()
+    batches_set: set[str] = set()
     for key, by_min in sorted(bucket.items()):
-        tx, rep = key
+        bx, tx, rep = key
+        batches_set.add(bx)
         treatments_set.add(tx)
         if rep is not None:
             replicates_set.add(rep)
@@ -919,6 +1039,7 @@ def boxplot_data(treatment: str | None = None, by_replicate: int = 0,
             stats = _box(by_min[mn])
             if not stats:
                 continue
+            stats["batch"] = bx
             stats["treatment"] = tx
             stats["minutes"] = mn
             if rep is not None:
@@ -927,6 +1048,7 @@ def boxplot_data(treatment: str | None = None, by_replicate: int = 0,
     return {
         "treatments": sorted(treatments_set),
         "replicates": sorted(replicates_set),
+        "batches": sorted(batches_set),
         "minutes": sorted(minutes_seen),
         "boxes": boxes,
         "by_replicate": bool(by_replicate),
@@ -934,27 +1056,27 @@ def boxplot_data(treatment: str | None = None, by_replicate: int = 0,
 
 
 @app.get("/api/well-gif")
-def well_gif(mount_id: str, folder_name: str,
+def well_gif(mount_id: str, batch: str, folder_name: str,
               max_width: int = 800, fps: int = 4,
-              accepted_only: int = 1, labels: int = 1) -> Response:
-    """Animated GIF of every aligned frame in a well, with accepted tracks
-    coloured (boundary + semi-transparent fill in each track's hue). The
+              accepted_only: int = 1, labels: int = 1, edges: int = 1) -> Response:
+    """Animated GIF of every aligned frame in a well, with accepted organoids
+    coloured (boundary + semi-transparent fill in each organoid's hue). The
     aligned canvas naturally pads with black where frames have shifted, so
     that shows up as borders in the GIF."""
     import io
+
     import imageio.v2 as imageio
 
-    mount, well = _find_well(mount_id, folder_name)
-    safe = folder_name.replace("/", "_")
+    mount, well = _find_well(mount_id, batch, folder_name)
 
-    # Tracks + validation overrides → which (track_id, valid) per frame.
-    tdata = _load_tracks(folder_name)
+    # Organoids + validation overrides → which (id, valid) per frame.
+    tdata = _load_tracks(batch, folder_name)
     if tdata is None:
-        raise HTTPException(status_code=404, detail="no tracks for well")
-    overrides = _load_validation(folder_name)
+        raise HTTPException(status_code=404, detail="no organoids for well")
+    overrides = _load_validation(batch, folder_name)
 
     # Per-frame label→(track_id, hue_rgb). Build once.
-    align = _well_alignment(mount, well)
+    align = _well_alignment(mount, batch, well)
     H_full, W_full = align.canvas_shape
     fill_alpha = 0.32
     # Compute per-frame index of (track_id, accepted, hue) for fast lookup.
@@ -976,9 +1098,8 @@ def well_gif(mount_id: str, folder_name: str,
     fmt_label = make_label_fmt([tp.label for tp in well.timepoints])
     frames_out: list[np.ndarray] = []
     for i, tp in enumerate(well.timepoints):
-        key = f"{mount_id}/{well.folder_name}/{tp.path.name}"
         try:
-            frame = _read_aligned(key)
+            frame = _read_aligned(_prefixed_key(mount, batch, tp.key))
         except HTTPException:
             continue
         if frame.ndim == 2:
@@ -990,27 +1111,39 @@ def well_gif(mount_id: str, folder_name: str,
         # Tint each accepted track's instance in this frame; remember the
         # (cx, cy, track_id, hue, r) of each so we can burn labels after.
         label_jobs: list[tuple[int, int, int, np.ndarray, int]] = []
-        mask_path = _CELLPOSE_CACHE_ROOT / safe / f"{tp.label}.mask.png"
+        mask_path = _scoped(_CELLPOSE_CACHE_ROOT, batch, folder_name,
+                            f"{tp.label}.mask.png")
         if mask_path.is_file() and i in per_frame_tracks:
             masks = cv2.imread(str(mask_path), cv2.IMREAD_UNCHANGED)
             if masks is not None and masks.shape == canvas.shape[:2]:
+                # One boundary pass and one hue lookup table for the frame.
+                # Doing `masks == lab` and find_boundaries per organoid meant a
+                # well with 96 organoids over 20 frames ran ~1900 full-image
+                # boundary computations, which took minutes.
+                counts = np.bincount(masks.ravel())
+                n_lab = counts.size
+                drawn = np.zeros(n_lab, dtype=bool)
+                hue_lut = np.zeros((n_lab, 3), dtype=np.float32)
                 for entry in per_frame_tracks[i]:
                     cx, cy = int(round(entry["cx"])), int(round(entry["cy"]))
                     if not (0 <= cx < masks.shape[1] and 0 <= cy < masks.shape[0]):
                         continue
                     lab = int(masks[cy, cx])
-                    if lab == 0:
+                    if lab == 0 or lab >= n_lab or counts[lab] == 0:
                         continue
-                    inst = masks == lab
-                    if not inst.any():
-                        continue
-                    canvas[inst] = canvas[inst] * (1 - fill_alpha) + entry["hue"] * fill_alpha
-                    bnd = find_boundaries(inst, mode="thick")
-                    canvas[bnd] = entry["hue"]
+                    drawn[lab] = True
+                    hue_lut[lab] = entry["hue"]
                     # Equivalent radius for label sizing.
-                    n_inst = int(inst.sum())
-                    r_eq = int(round((n_inst / 3.14159) ** 0.5))
+                    r_eq = int(round((int(counts[lab]) / 3.14159) ** 0.5))
                     label_jobs.append((cx, cy, entry["track_id"], entry["hue"], r_eq))
+                # edges=0 leaves the frames untinted. The mask is still read,
+                # because the id labels are sized from each instance's area.
+                sel = drawn[masks] if edges else None
+                if sel is not None and sel.any():
+                    hues = hue_lut[masks[sel]]
+                    canvas[sel] = canvas[sel] * (1 - fill_alpha) + hues * fill_alpha
+                    bnd = find_boundaries(masks, mode="thick") & sel
+                    canvas[bnd] = hue_lut[masks[bnd]]
 
         # Timestamp strip on the bottom-right corner.
         out = np.clip(canvas, 0, 255).astype(np.uint8)
@@ -1051,22 +1184,23 @@ def well_gif(mount_id: str, folder_name: str,
     imageio.mimsave(buf, frames_out, format="GIF", duration=1.0 / max(1, fps), loop=0)
     headers = {
         "Content-Disposition":
-            f'attachment; filename="{safe}_tracked.gif"'
+            f'attachment; filename="{_safe_name(batch)}_{_safe_name(folder_name)}_tracked.gif"'
     }
     return Response(content=buf.getvalue(), media_type="image/gif",
                     headers=headers)
 
 
 @app.get("/api/well-growth")
-def well_growth(mount_id: str, folder_name: str, valid_only: int = 1) -> dict:
-    """Per-track normalised area-over-time, ready for plotting.
+def well_growth(mount_id: str, batch: str, folder_name: str,
+                valid_only: int = 1) -> dict:
+    """Per-organoid normalised area-over-time, ready for plotting.
     Returns {tracks: [{id, valid, color_index, points: [{minutes, area_px,
     norm}, ...]}, ...]}. norm = area_px / area_px_at_first_detection."""
-    _, well = _find_well(mount_id, folder_name)
-    data = _load_tracks(folder_name)
+    _, well = _find_well(mount_id, batch, folder_name)
+    data = _load_tracks(batch, folder_name)
     if data is None:
         return {"available": False, "tracks": []}
-    overrides = _load_validation(folder_name)
+    overrides = _load_validation(batch, folder_name)
     tp_minutes = {tp.label: tp.minutes for tp in well.timepoints}
     out: list[dict] = []
     for t in data.get("tracks", []):
@@ -1104,12 +1238,13 @@ def well_growth(mount_id: str, folder_name: str, valid_only: int = 1) -> dict:
 @app.get("/api/bundle-export")
 def bundle_export(include_raw: int = 0) -> Response:
     """Stream a .tar.gz containing the current processed dataset:
-    .align_cache, .cellpose_cache, tracks, annotations. With include_raw=1
-    the raw data/ folder is bundled too (large)."""
+    .align_cache, .cellpose_cache, tracks. With include_raw=1 the raw data/
+    folder is bundled too (large). Annotations are not included — they live
+    in the database now, and travel with it."""
     import io
     import tarfile
     import time as _t
-    dirs = [".align_cache", ".cellpose_cache", "tracks", "annotations"]
+    dirs = [".align_cache", ".cellpose_cache", "tracks"]
     if include_raw:
         dirs.append("data")
 
@@ -1152,15 +1287,40 @@ def bundle_export(include_raw: int = 0) -> Response:
     )
 
 
+# Bundle members live under these roots; each gets the batch spliced in on
+# import, so one batch's results can never land on another's.
+_BUNDLE_ROOTS = (".align_cache", ".cellpose_cache", "tracks", "data")
+
+
+def _rebatch_member_name(name: str, batch: str) -> str | None:
+    """"tracks/DMSO r1.json" -> "tracks/<batch>/DMSO r1.json".
+
+    Bundles are produced by the offline CLI, which knows nothing about
+    batches, so its paths are flat. None for anything not under a known root
+    (manifest.json included — it is read separately, not extracted)."""
+    parts = Path(name).parts
+    if len(parts) < 2 or parts[0] not in _BUNDLE_ROOTS:
+        return None
+    return str(Path(parts[0]) / _safe_name(batch) / Path(*parts[1:]))
+
+
 @app.post("/api/bundle-import")
-async def bundle_import(request: Request) -> dict:
-    """Restore a .tar.gz bundle into the working directory. Expects the
-    raw bundle bytes as the request body (Content-Type: application/gzip)."""
+async def bundle_import(request: Request, batch: str) -> dict:
+    """Restore a .tar.gz results bundle into a named batch. Expects the raw
+    bundle bytes as the request body (Content-Type: application/gzip).
+
+    The bundle's flat paths are rewritten under the batch on the way in, since
+    well folder names ("DMSO r1") repeat across batches and a flat extract
+    would overwrite an earlier batch's results."""
     import io
     import tarfile
+    if not batch.strip() or "/" in batch or batch.startswith("."):
+        raise HTTPException(status_code=400, detail="invalid batch name")
     body = await request.body()
     if not body:
         raise HTTPException(status_code=400, detail="empty body")
+    root = Path.cwd().resolve()
+    n_members = 0
     try:
         with tarfile.open(fileobj=io.BytesIO(body), mode="r:gz") as tar:
             try:
@@ -1169,21 +1329,18 @@ async def bundle_import(request: Request) -> dict:
             except KeyError:
                 raise HTTPException(status_code=400,
                                      detail="not a cellyoulite bundle (no manifest.json)")
-            root = Path.cwd()
-            updated: set[str] = set()
+            members = []
             for member in tar.getmembers():
-                target = (root / member.name).resolve()
-                if root.resolve() not in target.parents and target != root.resolve():
+                scoped = _rebatch_member_name(member.name, batch)
+                if scoped is None:
+                    continue
+                target = (root / scoped).resolve()
+                if root not in target.parents:
                     continue  # refuse paths that escape the project root
-                # Figure out which experiments this bundle touches, by name:
-                # result files are keyed by the "<treatment> r<rep>" folder
-                # (as a dir segment, or a "<folder>[ __validation].json" stem).
-                for seg in Path(member.name).parts:
-                    stem = seg[:-5] if seg.endswith(".json") else seg
-                    stem = stem.split("__", 1)[0]
-                    if is_experiment_folder(stem):
-                        updated.add(stem)
-            tar.extractall(root, filter="data")
+                member.name = scoped
+                members.append(member)
+                n_members += 1
+            tar.extractall(root, members=members, filter="data")
     except tarfile.TarError as e:
         raise HTTPException(status_code=400, detail=f"bad tar: {e}")
     # Reset in-memory caches so the just-restored disk state is picked up.
@@ -1195,51 +1352,35 @@ async def bundle_import(request: Request) -> dict:
     shutil.rmtree(_EDGES_CACHE_ROOT, ignore_errors=True)
     shutil.rmtree(_STITCH_THUMB_ROOT, ignore_errors=True)
     # Translate the just-extracted analysis results into DB rows.
-    ingested = _ingest_results_to_db(sorted(updated))
-    return {"ok": True, "manifest": manifest,
-            "updated_experiments": sorted(updated), **ingested}
+    ingested = _ingest_results_to_db(batch)
+    return {"ok": True, "manifest": manifest, "batch": batch,
+            "n_files": n_members, **ingested}
 
 
-def _ingest_results_to_db(experiments: list[str]) -> dict:
+def _ingest_results_to_db(batch: str) -> dict:
     """After a results bundle is extracted to disk, translate its alignment +
     tracks/detections into DB rows (the cellpose mask PNGs stay on disk). This
-    is what makes "Add segmentation data" an upload to the database."""
-    ddir = _data_dir()
-    meta: dict[str, tuple] = {}
-    if ddir.is_dir():
-        for w in discover_grid(ddir).wells:
-            meta[w.folder_name] = (w.treatment, w.replicate, [tp.path for tp in w.timepoints])
-    n_align = n_tracks = 0
-    for name in experiments:
-        tr, rep, paths = meta.get(name, (None, None, None))
-        if paths and is_alignment_cached(paths):
-            al = compute_alignment_cached(paths)
-            repo.set_alignment(
-                name, _fingerprint(paths), _CACHE_VERSION,
-                al.canvas_shape[0], al.canvas_shape[1],
-                [list(o) for o in al.offsets], [list(p) for p in al.placements],
-                treatment=tr, replicate=rep)
-            n_align += 1
-        tpath = _TRACKS_ROOT / f"{name.replace('/', '_')}.json"
-        if tpath.is_file():
-            try:
-                tdata = json.loads(tpath.read_text())
-            except (OSError, ValueError):
-                tdata = None
-            if tdata:
-                src = _fingerprint(paths) if paths else None
-                n_tracks += repo.set_tracks(name, tdata, src, treatment=tr, replicate=rep)
-    return {"db_alignments": n_align, "db_tracks": n_tracks}
+    is what makes "Add segmentation data" an upload to the database.
+
+    The work lives in io/ingest so scripts/ingest_results.py can do the same
+    thing without going through an upload — this route buffers the whole
+    bundle in memory, which a small host cannot afford."""
+    out = ingest_batch(batch, _data_dir(), _TRACKS_ROOT)
+    return {"db_alignments": out["db_alignments"], "db_tracks": out["db_tracks"]}
 
 
 @app.post("/api/upload-images")
-async def upload_images(files: list[UploadFile] = File(...)) -> dict:
-    """Add raw images. Files arrive from a folder picker, each carrying a
-    relative path; the experiment folder ("<treatment> r<rep>") is detected
-    from that path by name, and the image is dropped into data/<folder>/.
-    Non-images and anything without a recognisable experiment folder are
-    skipped — so the caller can hand us a whole tree and we figure it out."""
-    data_root = _data_dir()
+async def upload_images(batch: str, files: list[UploadFile] = File(...)) -> dict:
+    """Add raw images to a batch. Files arrive from a folder picker, each
+    carrying a relative path; the image lands in data/<batch>/<folder>/.
+
+    The experiment folder is the last directory segment of the uploaded path —
+    it may name its own replicate ("DMSO r1") or just the condition ("008"),
+    with the plate positions inside it. Non-images are skipped, so the caller
+    can hand us a whole tree and we figure it out."""
+    if not batch.strip() or "/" in batch or batch.startswith("."):
+        raise HTTPException(status_code=400, detail="invalid batch name")
+    data_root = _data_dir() / _safe_name(batch)
     data_root.mkdir(parents=True, exist_ok=True)
     droot = data_root.resolve()
     added: dict[str, int] = {}
@@ -1247,13 +1388,10 @@ async def upload_images(files: list[UploadFile] = File(...)) -> dict:
     for up in files:
         rel = (up.filename or "").replace("\\", "/")
         parts = [p for p in rel.split("/") if p not in ("", ".", "..")]
-        if not parts or not is_image_name(parts[-1]):
+        if len(parts) < 2 or not is_image_name(parts[-1]):
             skipped += 1
             continue
-        exp = next((seg for seg in parts[:-1] if is_experiment_folder(seg)), None)
-        if exp is None:
-            skipped += 1
-            continue
+        exp = parts[-2]
         dest_dir = (data_root / exp).resolve()
         if droot not in dest_dir.parents and dest_dir != droot:
             skipped += 1
@@ -1261,26 +1399,23 @@ async def upload_images(files: list[UploadFile] = File(...)) -> dict:
         dest_dir.mkdir(parents=True, exist_ok=True)
         (dest_dir / parts[-1]).write_bytes(await up.read())
         added[exp] = added.get(exp, 0) + 1
-    return {"ok": True, "experiments": dict(sorted(added.items())),
+    return {"ok": True, "batch": batch, "experiments": dict(sorted(added.items())),
             "n_files": sum(added.values()), "n_experiments": len(added),
             "skipped": skipped}
 
 
 @app.get("/api/download-images")
-def download_images(exp: list[str] = Query(default=[])) -> Response:
-    """Stream a .tar.gz of raw images for the chosen experiments (all if
-    none are specified). Arcnames are data/<folder>/... so the archive can
-    be re-imported as-is."""
+def download_images(batch: str, exp: list[str] = Query(default=[])) -> Response:
+    """Stream a .tar.gz of raw images for the chosen experiments in a batch
+    (all of them if none are specified). Arcnames are data/<folder>/... —
+    flat, matching what the offline analysis tool expects as input."""
     import io
     import tarfile
     import time as _t
-    data_root = _data_dir()
+    data_root = _data_dir() / _safe_name(batch)
     if not data_root.is_dir():
-        raise HTTPException(status_code=404, detail="no data folder")
-    available = sorted(
-        p.name for p in data_root.iterdir()
-        if p.is_dir() and is_experiment_folder(p.name)
-    )
+        raise HTTPException(status_code=404, detail=f"no such batch: {batch}")
+    available = sorted(p.name for p in data_root.iterdir() if is_experiment_dir(p))
     chosen = [e for e in exp if e in available] if exp else available
     if not chosen:
         raise HTTPException(status_code=404, detail="no matching experiments")
@@ -1289,6 +1424,7 @@ def download_images(exp: list[str] = Query(default=[])) -> Response:
         "bundle_version": 1,
         "kind": "images",
         "created_at": _t.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "batch": batch,
         "experiments": chosen,
     }
     buf = io.BytesIO()
@@ -1306,7 +1442,8 @@ def download_images(exp: list[str] = Query(default=[])) -> Response:
         content=buf.getvalue(),
         media_type="application/gzip",
         headers={"Content-Disposition":
-                  f'attachment; filename="cellyoulite_images_{tag}_{stamp}.tar.gz"'},
+                  f'attachment; filename="cellyoulite_images_{_safe_name(batch)}'
+                  f'_{tag}_{stamp}.tar.gz"'},
     )
 
 
@@ -1345,25 +1482,30 @@ def align_status() -> dict:
     n_total = 0; n_done = 0
     for mount in _mounts():
         try:
-            spec = _wells_for_mount(mount)
+            batches = _batches_for_mount(mount)
         except Exception:  # noqa: BLE001
             continue
-        for w in spec.wells:
-            paths = [tp.path for tp in w.timepoints]
-            cached = is_alignment_cached(paths)
-            rows.append({
-                "mount_id": mount["id"],
-                "folder_name": w.folder_name,
-                "cached": cached,
-            })
-            n_total += 1
-            n_done += 1 if cached else 0
+        for b in batches:
+            for w in b["spec"].wells:
+                paths = [tp.path for tp in w.timepoints]
+                cached = is_alignment_cached(paths)
+                rows.append({
+                    "mount_id": mount["id"],
+                    "batch": b["name"],
+                    "folder_name": w.folder_name,
+                    "cached": cached,
+                })
+                n_total += 1
+                n_done += 1 if cached else 0
     return {"wells": rows, "n_total": n_total, "n_done": n_done}
 
 
 @app.post("/api/align-run")
 def align_run(force: bool = False) -> dict:
-    import subprocess, sys, threading, time as _t
+    import subprocess
+    import sys
+    import threading
+    import time as _t
     global _align_job_lock
     if _align_job_lock is None:
         _align_job_lock = threading.Lock()
@@ -1541,13 +1683,13 @@ def _hue_for_track(track_id: int) -> tuple[int, int, int]:
     return int((b + m) * 255), int((g + m) * 255), int((r + m) * 255)
 
 
-def _label_to_track(mount, well, t_idx, masks):
-    """Map mask instance label → (track_id, valid) for the given frame, by
-    looking up which track owns each instance based on its centroid."""
-    data = _load_tracks(well.folder_name)
+def _label_to_track(mount, batch, well, t_idx, masks):
+    """Map mask instance label → (organoid id, valid) for the given frame, by
+    looking up which organoid owns each instance based on its centroid."""
+    data = _load_tracks(batch, well.folder_name)
     if data is None:
         return {}
-    overrides = _load_validation(well.folder_name)
+    overrides = _load_validation(batch, well.folder_name)
     # Pull this frame's detections by t_idx for fast lookup.
     frame_dets = []  # [(cx, cy, track_id, accepted)]
     for t in data.get("tracks", []):
@@ -1558,24 +1700,36 @@ def _label_to_track(mount, well, t_idx, masks):
                 break
     if not frame_dets:
         return {}
-    # For each instance label, find its centroid and match to the closest
-    # track-detection centroid (cheap; aligned-canvas coords match).
+    # Centroid of every instance in one pass. `np.where(masks == lab)` per
+    # label re-scans the whole image each time, which on a dense frame (>1000
+    # instances) cost seconds; bincount does it in a single sweep.
+    flat = masks.ravel()
+    counts = np.bincount(flat)
+    n_lab = counts.size
+    if n_lab < 2:
+        return {}
+    ys, xs = np.indices(masks.shape)
+    sum_y = np.bincount(flat, weights=ys.ravel(), minlength=n_lab)
+    sum_x = np.bincount(flat, weights=xs.ravel(), minlength=n_lab)
+    present = np.flatnonzero(counts)
+    present = present[present != 0]
+    if present.size == 0:
+        return {}
+    cys = sum_y[present] / counts[present]
+    cxs = sum_x[present] / counts[present]
+
+    # Nearest detection per instance, vectorised over both sides.
+    det = np.array([(fcx, fcy) for fcx, fcy, _, _ in frame_dets], dtype=float)
+    d2 = ((cxs[:, None] - det[None, :, 0]) ** 2
+          + (cys[:, None] - det[None, :, 1]) ** 2)
+    nearest = d2.argmin(axis=1)
+    best_d2 = d2[np.arange(d2.shape[0]), nearest]
+
     out: dict[int, tuple[int, bool]] = {}
-    labels = np.unique(masks)
-    for lab in labels:
-        if lab == 0:
-            continue
-        ys, xs = np.where(masks == lab)
-        if ys.size == 0:
-            continue
-        cx, cy = float(xs.mean()), float(ys.mean())
-        best = None
-        for fcx, fcy, tid, valid in frame_dets:
-            d = (fcx - cx) ** 2 + (fcy - cy) ** 2
-            if best is None or d < best[0]:
-                best = (d, tid, valid)
-        if best and best[0] < 9.0 ** 2:  # within 9 px
-            out[int(lab)] = (best[1], best[2])
+    for lab, j, dist2 in zip(present, nearest, best_d2, strict=True):
+        if dist2 < 9.0 ** 2:            # within 9 px
+            _, _, tid, valid = frame_dets[j]
+            out[int(lab)] = (tid, valid)
     return out
 
 
@@ -1590,19 +1744,13 @@ def cellpose_edges(key: str, aligned: int = 1, by_track: int = 1,
     hide_invalid=1 skips drawing the segmentation of deactivated (rejected)
     tracks entirely, so hiding deactivated organoids hides their masks too."""
     mount, rest = _split_key(key)
-    parts = rest.split("/", 1)
-    if len(parts) != 2:
-        raise HTTPException(status_code=400, detail="bad key")
-    well_folder, filename = parts
-    spec = _wells_for_mount(mount)
-    well = next((w for w in spec.wells if w.folder_name == well_folder), None)
-    if well is None:
-        raise HTTPException(status_code=404, detail="well not found")
-    t_idx, tp = _well_tp_index(mount, well, filename)
+    batch, inner_key = _split_batch(rest)
+    well = _well_for_inner_key(mount, batch, inner_key)
+    t_idx, tp = _well_tp_index(well, inner_key)
     if tp is None:
         raise HTTPException(status_code=404, detail="timepoint not found")
-    safe_well = well_folder.replace("/", "_")
-    mask_path = _CELLPOSE_CACHE_ROOT / safe_well / f"{tp.label}.mask.png"
+    well_folder = well.folder_name
+    mask_path = _scoped(_CELLPOSE_CACHE_ROOT, batch, well_folder, f"{tp.label}.mask.png")
     if not mask_path.is_file():
         bgra = np.zeros((1, 1, 4), dtype=np.uint8)
         ok, png = cv2.imencode(".png", bgra)
@@ -1619,7 +1767,7 @@ def cellpose_edges(key: str, aligned: int = 1, by_track: int = 1,
         mask_mtime = 0
     val_sig = ""
     if by_track:
-        ov = repo.get_validation(well_folder)["overrides"]
+        ov = repo.get_validation(batch, well_folder)["overrides"]
         val_sig = json.dumps(sorted((int(k), bool(v)) for k, v in ov.items()))
     tag = hashlib.sha1(
         f"{key}|{aligned}|{by_track}|{fill}|{fill_alpha}|{hide_invalid}|"
@@ -1639,13 +1787,19 @@ def cellpose_edges(key: str, aligned: int = 1, by_track: int = 1,
     bgra = np.zeros((h, w, 4), dtype=np.uint8)
 
     if by_track:
-        lab2tr = _label_to_track(mount, well, t_idx, masks)
+        lab2tr = _label_to_track(mount, batch, well, t_idx, masks)
         fill_a = max(0, min(255, int(fill_alpha)))
+        # Colour via a per-label lookup table rather than a pass per instance.
+        # A frame can hold >1000 instances, and `masks == lab` scans the whole
+        # image each time — that made this O(instances x pixels) and cost ~18 s
+        # a frame on a dense well. Indexing the LUT is a single pass.
+        n_lab = int(masks.max()) + 1
+        lut_rgb = np.zeros((n_lab, 3), dtype=np.uint8)
+        lut_fill = np.zeros(n_lab, dtype=np.uint8)
+        lut_edge = np.zeros(n_lab, dtype=np.uint8)
         for lab in np.unique(masks):
             if lab == 0:
                 continue
-            inst = masks == lab
-            inst_boundary = inst & boundary
             tr = lab2tr.get(int(lab))
             if tr is None:
                 bcol = (255, 255, 255)  # untracked → white
@@ -1655,11 +1809,13 @@ def cellpose_edges(key: str, aligned: int = 1, by_track: int = 1,
                 bcol = (138, 138, 138)  # invalid → desaturated grey
             else:
                 bcol = _hue_for_track(tr[0])
-            if fill:
-                # Semi-transparent interior in the same hue.
-                bgra[inst] = (bcol[0], bcol[1], bcol[2], fill_a)
-            # Boundary on top, fully opaque.
-            bgra[inst_boundary] = (bcol[0], bcol[1], bcol[2], 255)
+            lut_rgb[lab] = bcol
+            lut_fill[lab] = fill_a if fill else 0
+            lut_edge[lab] = 255         # boundary on top, fully opaque
+        bgra[..., :3] = lut_rgb[masks]
+        bgra[..., 3] = lut_fill[masks]
+        on_edge = boundary & (masks > 0)
+        bgra[..., 3][on_edge] = lut_edge[masks[on_edge]]
     else:
         if fill:
             inst_any = masks > 0
@@ -1667,7 +1823,7 @@ def cellpose_edges(key: str, aligned: int = 1, by_track: int = 1,
         bgra[boundary] = [72, 86, 255, 255]
 
     if not aligned:
-        align = _well_alignment(mount, well)
+        align = _well_alignment(mount, batch, well)
         if align.placements:
             y0, x0 = align.placements[t_idx]
             img = imread(_safe_image_path(key))
@@ -1687,9 +1843,20 @@ def cellpose_edges(key: str, aligned: int = 1, by_track: int = 1,
                              "ETag": f'"{tag}"'})
 
 
-def _well_tp_index(mount, well, filename):
+def _well_for_inner_key(mount: dict, batch: str, inner_key: str):
+    """The well owning "<folder>/<file>" within a batch. Matched on the
+    timepoint key, since several wells can share one plate directory."""
+    spec = _wells_for_batch(mount, batch)
+    well = next((w for w in spec.wells
+                 if any(tp.key == inner_key for tp in w.timepoints)), None)
+    if well is None:
+        raise HTTPException(status_code=404, detail="well not found")
+    return well
+
+
+def _well_tp_index(well, inner_key: str):
     for i, t in enumerate(well.timepoints):
-        if t.path.name == filename:
+        if t.key == inner_key:
             return i, t
     return None, None
 
@@ -1702,26 +1869,19 @@ def cellpose_circles(key: str, aligned: int = 1) -> dict:
     aligned=0 → coordinates shifted into the raw image space, and
     circles whose centre falls outside the raw image are dropped."""
     mount, rest = _split_key(key)
-    parts = rest.split("/", 1)
-    if len(parts) != 2:
-        raise HTTPException(status_code=400, detail="bad key")
-    well_folder, filename = parts
-    spec = _wells_for_mount(mount)
-    well = next((w for w in spec.wells if w.folder_name == well_folder), None)
-    if well is None:
-        raise HTTPException(status_code=404, detail="well not found")
-    t_idx, tp = _well_tp_index(mount, well, filename)
+    batch, inner_key = _split_batch(rest)
+    well = _well_for_inner_key(mount, batch, inner_key)
+    t_idx, tp = _well_tp_index(well, inner_key)
     if tp is None:
         raise HTTPException(status_code=404, detail="timepoint not found")
-    safe_well = well_folder.replace("/", "_")
-    path = _CELLPOSE_CACHE_ROOT / safe_well / f"{tp.label}.json"
+    path = _scoped(_CELLPOSE_CACHE_ROOT, batch, well.folder_name, f"{tp.label}.json")
     if not path.is_file():
         return {"cached": False, "circles": []}
     try:
         data = json.loads(path.read_text())
     except (OSError, ValueError):
         return {"cached": False, "circles": []}
-    align = _well_alignment(mount, well)
+    align = _well_alignment(mount, batch, well)
     h, w = align.canvas_shape if align.canvas_shape else (0, 0)
     circles = data.get("circles", [])
 
@@ -1756,23 +1916,25 @@ def cellpose_status() -> dict:
     n_done_all = 0
     for mount in _mounts():
         try:
-            spec = _wells_for_mount(mount)
+            batches = _batches_for_mount(mount)
         except Exception:  # noqa: BLE001
             continue
-        for w in spec.wells:
-            done = _cellpose_done_labels(w.folder_name)
-            total_labels = {tp.label for tp in w.timepoints}
-            n_done = len(done & total_labels)
-            n_total = len(total_labels)
-            rows.append({
-                "mount_id": mount["id"],
-                "folder_name": w.folder_name,
-                "n_total": n_total,
-                "n_done": n_done,
-                "labels_done": sorted(done & total_labels),
-            })
-            n_total_all += n_total
-            n_done_all += n_done
+        for b in batches:
+            for w in b["spec"].wells:
+                done = _cellpose_done_labels(b["name"], w.folder_name)
+                total_labels = {tp.label for tp in w.timepoints}
+                n_done = len(done & total_labels)
+                n_total = len(total_labels)
+                rows.append({
+                    "mount_id": mount["id"],
+                    "batch": b["name"],
+                    "folder_name": w.folder_name,
+                    "n_total": n_total,
+                    "n_done": n_done,
+                    "labels_done": sorted(done & total_labels),
+                })
+                n_total_all += n_total
+                n_done_all += n_done
     return {
         "wells": rows,
         "n_total": n_total_all,
@@ -1885,20 +2047,9 @@ def detect_debug(
 
 
 # ---------------------- annotation tool ----------------------
-
-_ANN_ROOT = Path.cwd() / "annotations"
-
-
-def _ann_dir(well: str) -> Path:
-    safe_well = well.replace("/", "_")
-    p = _ANN_ROOT / safe_well
-    p.mkdir(parents=True, exist_ok=True)
-    return p
-
-
-def _ann_path(well: str, label: str) -> Path:
-    safe_label = label.replace("/", "_")
-    return _ann_dir(well) / f"{safe_label}.json"
+# Ground-truth circles live in the DB (migration v4), alongside every other
+# authored decision — they used to be annotations/<well>/<label>.json, which
+# had no batch scoping and sat outside the database backup.
 
 
 @app.get("/annotate", response_class=HTMLResponse)
@@ -1909,20 +2060,16 @@ def annotate_page(request: Request) -> HTMLResponse:
 
 
 @app.get("/api/annotations")
-def get_annotations(well: str, label: str) -> dict:
-    path = _ann_path(well, label)
-    if not path.is_file():
+def get_annotations(batch: str, well: str, label: str) -> dict:
+    data = repo.get_annotation(batch, well, label)
+    if data is None:
         return {"circles": [], "exists": False}
-    try:
-        data = json.loads(path.read_text())
-    except (OSError, ValueError):
-        return {"circles": [], "exists": False}
-    return {"circles": data.get("circles", []), "exists": True,
+    return {"circles": data["circles"], "exists": True,
             "meta": {k: v for k, v in data.items() if k != "circles"}}
 
 
 @app.post("/api/annotations")
-def save_annotations(well: str, label: str, aligned: int = 0,
+def save_annotations(batch: str, well: str, label: str, aligned: int = 0,
                      body: dict = Body(...)) -> dict:
     circles = body.get("circles", [])
     # Normalise + validate.
@@ -1937,17 +2084,11 @@ def save_annotations(well: str, label: str, aligned: int = 0,
             })
         except (KeyError, TypeError, ValueError):
             raise HTTPException(status_code=400, detail="bad circle in payload")
-    payload = {
-        "well": well,
-        "label": label,
-        "aligned": bool(aligned),
-        "key": body.get("key"),
-        "image_w": body.get("image_w"),
-        "image_h": body.get("image_h"),
-        "circles": clean,
-    }
-    _ann_path(well, label).write_text(json.dumps(payload, indent=2))
-    return {"ok": True, "n": len(clean)}
+    n = repo.set_annotation(
+        batch, well, label, clean, aligned=bool(aligned),
+        source_key=body.get("key"),
+        image_w=body.get("image_w"), image_h=body.get("image_h"))
+    return {"ok": True, "n": n}
 
 
 @app.get("/healthz")

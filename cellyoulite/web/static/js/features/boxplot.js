@@ -18,7 +18,10 @@ export async function refreshBoxplot() {
   const starsOnly = $("box-stars-only").checked ? 1 : 0;
   if ($("box-back")) $("box-back").hidden = !drill;
   const treatmentQs = drill ? `&treatment=${encodeURIComponent(drill)}` : "";
-  const url = `/api/boxplot-data?by_replicate=${byRep}&stars_only=${starsOnly}${treatmentQs}`;
+  // Treatment names repeat across batches, so pooling them would mix two
+  // experiments into one distribution. Follow the grid's batch selection.
+  const batchQs = state.batch ? `&batch=${encodeURIComponent(state.batch)}` : "";
+  const url = `/api/boxplot-data?by_replicate=${byRep}&stars_only=${starsOnly}${treatmentQs}${batchQs}`;
   // Keep the current plot in place while the (cached, fast) fetch runs — don't
   // collapse it to a placeholder, which shrinks the page and makes the scroll
   // jump up.
@@ -76,6 +79,7 @@ function renderBoxplot(data) {
   // Transform every box's stats once, so renderers don't need to know
   // about the scale; they just plot what's given to them.
   const tBoxes = boxes.map(b => ({
+    batch: b.batch,
     treatment: b.treatment,
     minutes: b.minutes,
     replicate: b.replicate,
@@ -98,8 +102,10 @@ function renderBoxplot(data) {
 
   // Summary
   const totalN = boxes.reduce((a, b) => a + (b.n || 0), 0);
+  const nBatches = (data.batches || []).length;
   $("box-summary").innerHTML =
-    `<strong>${treatments.length}</strong> treatment(s) · `
+    (nBatches > 1 ? `<strong>${nBatches}</strong> batches · ` : "")
+    + `<strong>${treatments.length}</strong> treatment(s) · `
     + `<strong>${minutes.length}</strong> timepoints · `
     + `<strong>${totalN}</strong> organoid-frame observations`;
 
@@ -118,15 +124,24 @@ function renderBoxplot(data) {
     return;
   }
 
-  const byTreat = new Map(treatments.map(t => [t, []]));
-  for (const b of tBoxes) {
-    if (byTreat.has(b.treatment)) byTreat.get(b.treatment).push(b);
+  // One facet per (batch, treatment). The same treatment name exists in more
+  // than one batch, so merging them here would put two different experiments
+  // — on different time axes — into a single panel.
+  const batches = data.batches || [];
+  const cells = [];
+  for (const bx of (batches.length ? batches : [null])) {
+    for (const t of treatments) {
+      const sel = tBoxes.filter(b => b.treatment === t &&
+                                     (bx === null || b.batch === bx));
+      if (sel.length) cells.push({ batch: bx, treatment: t, boxes: sel });
+    }
   }
+  const showBatch = batches.length > 1;
   const subWidth = 420, subHeight = 230;
-  const tiles = treatments.map(t => {
+  const tiles = cells.map(({ batch: bx, treatment: t, boxes: sel }) => {
     const sub = renderBoxSubplot({
-      title: t,
-      boxes: byTreat.get(t),
+      title: showBatch ? `${t}  ·  ${bx}` : t,
+      boxes: sel,
       minutes, treatments: [t], series, byRep, scale,
       yMin, yMax,
       width: subWidth, height: subHeight, large: false,
@@ -302,9 +317,11 @@ export function initBoxplot() {
     const orig = btn.textContent;
     btn.disabled = true; btn.textContent = "…";
     try {
-      const url = state.boxDrill
-        ? `/api/growth-csv?treatment=${encodeURIComponent(state.boxDrill)}`
-        : `/api/growth-csv`;
+      const params = new URLSearchParams();
+      if (state.boxDrill) params.set("treatment", state.boxDrill);
+      if (state.batch) params.set("batch", state.batch);
+      const q = params.toString();
+      const url = q ? `/api/growth-csv?${q}` : `/api/growth-csv`;
       const r = await fetch(url);
       if (!r.ok) throw new Error(r.statusText);
       const blob = await r.blob();

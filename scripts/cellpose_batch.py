@@ -23,7 +23,12 @@ from skimage.io import imread
 
 from cellyoulite.io.grid import discover_grid
 from cellyoulite.pipeline.align import compute_alignment_cached, paste_onto_canvas
-
+from cellyoulite.pipeline.segment import (
+    MAX_RADIUS_PX,
+    MIN_AREA_PX,
+    MIN_RADIUS_PX,
+    masks_to_circles,
+)
 
 _CACHE_ROOT = Path.cwd() / ".cellpose_cache"
 
@@ -32,22 +37,6 @@ def _to_gray(img: np.ndarray) -> np.ndarray:
     if img.ndim == 3:
         img = img[..., :3].mean(axis=-1)
     return img.astype(np.float32)
-
-
-def _masks_to_circles(masks: np.ndarray) -> list[dict]:
-    out = []
-    for label in np.unique(masks):
-        if label == 0:
-            continue
-        ys, xs = np.where(masks == label)
-        if ys.size < 50:
-            continue
-        cx, cy = float(xs.mean()), float(ys.mean())
-        r = float(np.sqrt(ys.size / np.pi))
-        if r < 18 or r > 200:
-            continue
-        out.append({"cx": cx, "cy": cy, "r": r, "area_px": int(ys.size)})
-    return out
 
 
 def _aligned_frame(well, t_idx, align):
@@ -90,7 +79,8 @@ def _mask_path(well_folder: str, label: str) -> Path:
 
 def _process_one(args: tuple) -> dict:
     """Worker: do one (well, t_idx). Returns a small result dict."""
-    well_folder, t_idx, label, paths, placement, canvas_shape, gpu, force = args
+    (well_folder, t_idx, label, paths, placement, canvas_shape, gpu, force,
+     circle_opts) = args
     out_path = _cache_path(well_folder, label)
     mask_path = _mask_path(well_folder, label)
     # Only treat as a cache hit if BOTH the circles JSON and the mask sidecar
@@ -118,7 +108,7 @@ def _process_one(args: tuple) -> dict:
     masks, _, _ = model.eval(img, diameter=None)
     elapsed_ms = int((time.perf_counter() - t0) * 1000)
 
-    circles = _masks_to_circles(masks)
+    circles = masks_to_circles(masks, **circle_opts)
     out_path.write_text(json.dumps({
         "well": well_folder, "label": label, "t_idx": t_idx,
         "model": "cpsam", "circles": circles,
@@ -150,7 +140,21 @@ def main() -> None:
                     help="use GPU; forces workers=1 (single process)")
     ap.add_argument("--force", action="store_true",
                     help="recompute even if cache file exists")
+    ap.add_argument("--min-radius", type=float, default=MIN_RADIUS_PX,
+                    help="smallest instance to keep, in px (default %(default)s). "
+                         "This gate dominates yield — on a plate of small "
+                         "objects the default can reject most of the mask. "
+                         "Changing it does NOT need the GPU: see "
+                         "scripts/recircle.py, which re-derives detections "
+                         "from the cached masks.")
+    ap.add_argument("--max-radius", type=float, default=MAX_RADIUS_PX,
+                    help="largest instance to keep, in px (default %(default)s)")
+    ap.add_argument("--min-area", type=int, default=MIN_AREA_PX,
+                    help="smallest instance to keep, in px^2 (default %(default)s)")
     args = ap.parse_args()
+    circle_opts = {"min_radius_px": args.min_radius,
+                   "max_radius_px": args.max_radius,
+                   "min_area_px": args.min_area}
 
     spec = discover_grid(args.folder)
     wells = spec.wells
@@ -182,7 +186,7 @@ def main() -> None:
         for i, tp in enumerate(w.timepoints):
             tasks.append((w.folder_name, i, tp.label, paths,
                           align.placements[i], align.canvas_shape,
-                          args.gpu, args.force))
+                          args.gpu, args.force, circle_opts))
     print(f"queued {len(tasks)} frame(s) across {len(wells)} well(s) — "
           f"workers={1 if args.gpu else args.workers}")
 

@@ -38,6 +38,9 @@ build/
 # Experiment output (annotated stills, HTML reports, etc.)
 /out/
 
+# Bundle metadata, left behind by a results import/export — not source
+/manifest.json
+
 # Password-less user-account registry (runtime state, created on first use)
 /users.json
 

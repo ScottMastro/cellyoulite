@@ -1,5 +1,8 @@
 -- CellxYou Lite — schema v1. Applied when PRAGMA user_version < 1.
--- See DB.md. IF NOT EXISTS keeps it safe to (re)apply on a partial DB.
+-- This is the v1 snapshot only; later columns and tables (batch scoping,
+-- annotations) are added by the steps in migrate.py, which is where the
+-- current shape actually lives. IF NOT EXISTS keeps it safe to (re)apply
+-- on a partial DB.
 
 -- Wells are keyed by folder_name today (mount_id is ignored in current paths).
 CREATE TABLE IF NOT EXISTS well (

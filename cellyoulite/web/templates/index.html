@@ -109,6 +109,7 @@
 
   <section class="card workspace" id="grid-card" hidden>
     <div class="chooser">
+      <nav class="batch-tabs" id="batch-tabs" hidden></nav>
       <div id="thumb-grid"></div>
     </div>
 
@@ -127,6 +128,8 @@
             <span class="swatch swatch-ids">#</span> ids</label>
           <label class="toggle"><input type="checkbox" id="toggle-deactivated">
             <span class="swatch swatch-invalid"></span> deactivated</label>
+          <button id="well-gif" class="ghost"
+                  title="download every aligned frame as an animated GIF">GIF ↓</button>
           <button id="viewer-fs" class="ghost" title="fullscreen">⛶</button>
           <button id="well-close" class="ghost">close</button>
         </div>
@@ -202,6 +205,7 @@
     </div><!-- /panel-curate -->
 
     <div class="tab-panel" id="panel-results" hidden>
+  <nav class="batch-tabs" id="batch-tabs-results" hidden></nav>
   <section class="card" id="boxplot-card" hidden>
     <h2>Growth distributions</h2>
     <div class="box-bar">
