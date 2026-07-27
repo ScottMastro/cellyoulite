@@ -3,16 +3,21 @@
 // thumbnail opens that well in the viewer.
 import { $, escapeHtml, setStatus, renderPills } from "../core/dom.js";
 import { imgUrl } from "../core/api.js";
-import { state } from "../core/state.js";
+import { state, wellKey } from "../core/state.js";
 import * as well from "./well.js";
 
 export async function refreshGrid() {
   setStatus("live", "scanning…");
   try {
-    const r = await fetch(`/api/grid`);
+    const qs = state.batch ? `?batch=${encodeURIComponent(state.batch)}` : "";
+    const r = await fetch(`/api/grid${qs}`);
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || r.statusText);
     state.grid = data;
+    state.batches = data.batches || [];
+    // A batch that has gone away (renamed on disk) falls back to "all".
+    if (state.batch && !state.batches.includes(state.batch)) state.batch = null;
+    renderBatchPicker();
     renderPills("grid-pills", [
       ["treatments", data.treatments.length],
       ["replicates", data.replicates.length],
@@ -27,10 +32,30 @@ export async function refreshGrid() {
   }
 }
 
+export function renderBatchPicker() {
+  const el = $("batch-picker");
+  if (!el) return;
+  // Nothing to choose between until a second batch exists.
+  const hide = state.batches.length < 2;
+  el.hidden = hide;
+  if ($("batch-pick-label")) $("batch-pick-label").hidden = hide;
+  if (hide) return;
+  const opts = [`<option value="">All batches</option>`].concat(
+    state.batches.map(b =>
+      `<option value="${escapeHtml(b)}"${b === state.batch ? " selected" : ""}>${escapeHtml(b)}</option>`)
+  );
+  el.innerHTML = opts.join("");
+  el.onchange = () => {
+    state.batch = el.value || null;
+    refreshGrid();
+  };
+}
+
 function thumbHtml(w, treatment) {
-  const st = state.cellposeStatus.get(w.folder_name);
-  const tracked = state.trackDoneByWell.get(w.folder_name) === true;
-  const humanValidated = state.humanValidatedByWell.get(w.folder_name) === true;
+  const k = wellKey(w.batch, w.folder_name);
+  const st = state.cellposeStatus.get(k);
+  const tracked = state.trackDoneByWell.get(k) === true;
+  const humanValidated = state.humanValidatedByWell.get(k) === true;
   let badge = "";
   if (st) {
     let cls;
@@ -48,7 +73,8 @@ function thumbHtml(w, treatment) {
   const valChip = `<span class="val-chip ${valCls}" title="${valTitle}">${valGlyph}</span>`;
   return `<div class="thumb"
                data-mount="${w.mount_id}"
-               data-folder-name="${w.folder_name}"
+               data-batch="${escapeHtml(w.batch)}"
+               data-folder-name="${escapeHtml(w.folder_name)}"
                data-key="${w.thumb_key}">
             <img loading="lazy" src="${imgUrl(w.thumb_key, 128)}" alt="${escapeHtml(treatment)} r${w.replicate}">
             <span class="thumb-tag">r${w.replicate}</span>
@@ -59,35 +85,42 @@ function thumbHtml(w, treatment) {
 
 export function renderThumbGrid(data) {
   const { replicates, wells } = data;
-  // Group wells into rows keyed by (mount, treatment).
+  // Group wells into rows keyed by (batch, treatment) — the same treatment
+  // name in two batches is two different experiments and gets its own row.
   const rowKeys = [];
   const rowMeta = new Map();
   for (const w of wells) {
-    const k = `${w.mount_id}|${w.treatment}`;
+    const k = `${w.mount_id}|${w.batch}|${w.treatment}`;
     if (!rowMeta.has(k)) {
       rowKeys.push(k);
-      rowMeta.set(k, { mount_id: w.mount_id, mount_alias: w.mount_alias, treatment: w.treatment });
+      rowMeta.set(k, { mount_id: w.mount_id, batch: w.batch, treatment: w.treatment });
     }
   }
   rowKeys.sort((a, b) => {
     const A = rowMeta.get(a), B = rowMeta.get(b);
-    return A.mount_alias.localeCompare(B.mount_alias) || A.treatment.localeCompare(B.treatment);
+    return A.batch.localeCompare(B.batch) || A.treatment.localeCompare(B.treatment);
   });
-  const byCell = new Map(wells.map(w => [`${w.mount_id}|${w.treatment}|${w.replicate}`, w]));
+  const byCell = new Map(
+    wells.map(w => [`${w.mount_id}|${w.batch}|${w.treatment}|${w.replicate}`, w]));
+  // Only worth naming the batch on each row when more than one is on screen.
+  const showBatch = new Set(wells.map(w => w.batch)).size > 1;
 
   $("thumb-grid").innerHTML = rowKeys.map(rk => {
-    const { mount_id, treatment } = rowMeta.get(rk);
+    const { mount_id, batch, treatment } = rowMeta.get(rk);
     const cells = replicates.map(r => {
-      const w = byCell.get(`${mount_id}|${treatment}|${r}`);
+      const w = byCell.get(`${mount_id}|${batch}|${treatment}|${r}`);
       return (w && w.thumb_key) ? thumbHtml(w, treatment) : `<div class="thumb empty"></div>`;
     }).join("");
+    const label = showBatch
+      ? `${escapeHtml(treatment)}<span class="exp-row-batch">${escapeHtml(batch)}</span>`
+      : escapeHtml(treatment);
     return `<div class="exp-row">
-              <div class="exp-row-label" title="${escapeHtml(treatment)}">${escapeHtml(treatment)}</div>
+              <div class="exp-row-label" title="${escapeHtml(batch + " · " + treatment)}">${label}</div>
               <div class="exp-row-thumbs">${cells}</div>
             </div>`;
   }).join("");
 
   $("thumb-grid").querySelectorAll(".thumb[data-key]").forEach(el => {
-    el.onclick = () => well.openWell(el.dataset.mount, el.dataset.folderName);
+    el.onclick = () => well.openWell(el.dataset.mount, el.dataset.batch, el.dataset.folderName);
   });
 }

@@ -18,7 +18,10 @@ export async function refreshBoxplot() {
   const starsOnly = $("box-stars-only").checked ? 1 : 0;
   if ($("box-back")) $("box-back").hidden = !drill;
   const treatmentQs = drill ? `&treatment=${encodeURIComponent(drill)}` : "";
-  const url = `/api/boxplot-data?by_replicate=${byRep}&stars_only=${starsOnly}${treatmentQs}`;
+  // Treatment names repeat across batches, so pooling them would mix two
+  // experiments into one distribution. Follow the grid's batch selection.
+  const batchQs = state.batch ? `&batch=${encodeURIComponent(state.batch)}` : "";
+  const url = `/api/boxplot-data?by_replicate=${byRep}&stars_only=${starsOnly}${treatmentQs}${batchQs}`;
   // Keep the current plot in place while the (cached, fast) fetch runs — don't
   // collapse it to a placeholder, which shrinks the page and makes the scroll
   // jump up.
@@ -302,9 +305,11 @@ export function initBoxplot() {
     const orig = btn.textContent;
     btn.disabled = true; btn.textContent = "…";
     try {
-      const url = state.boxDrill
-        ? `/api/growth-csv?treatment=${encodeURIComponent(state.boxDrill)}`
-        : `/api/growth-csv`;
+      const params = new URLSearchParams();
+      if (state.boxDrill) params.set("treatment", state.boxDrill);
+      if (state.batch) params.set("batch", state.batch);
+      const q = params.toString();
+      const url = q ? `/api/growth-csv?${q}` : `/api/growth-csv`;
       const r = await fetch(url);
       if (!r.ok) throw new Error(r.statusText);
       const blob = await r.blob();

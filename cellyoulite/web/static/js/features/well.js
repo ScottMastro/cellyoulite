@@ -1,11 +1,14 @@
 // Well detail: image viewer, filmstrip, frame scrubbing/playback, cellpose
 // overlay + track colouring, per-track validation, and GIF export.
 import { $, setStatus } from "../core/dom.js";
-import { alignFlag, imgUrl, edgesUrl } from "../core/api.js";
-import { state } from "../core/state.js";
+import { alignFlag, imgUrl, edgesUrl, wellQs, openWellQs } from "../core/api.js";
+import { state, wellKey } from "../core/state.js";
 import * as grid from "./grid.js";
 import * as growth from "./growth.js";
 import * as boxplot from "./boxplot.js";
+
+// Per-well state maps are keyed by batch + folder, never folder alone.
+const openWellKey = () => wellKey(state.well.batch, state.well.folder_name);
 
 // Longest-side cap for the playback viewer. The base image is displayed at
 // the canvas height (CSS), so a shrunk JPEG looks identical but loads far
@@ -26,15 +29,16 @@ function prewarmFrames(well, aligned) {
   }
 }
 
-export async function openWell(mountId, folderName) {
+export async function openWell(mountId, batch, folderName) {
   stopPlay();
   document.querySelectorAll(".thumb.selected").forEach(e => e.classList.remove("selected"));
-  document.querySelector(`.thumb[data-mount="${CSS.escape(mountId)}"][data-folder-name="${CSS.escape(folderName)}"]`)?.classList.add("selected");
+  document.querySelector(`.thumb[data-mount="${CSS.escape(mountId)}"][data-batch="${CSS.escape(batch)}"]`
+    + `[data-folder-name="${CSS.escape(folderName)}"]`)?.classList.add("selected");
 
   $("well-card").hidden = false;
   $("tracks-card").hidden = false;
 
-  const qs = `mount_id=${encodeURIComponent(mountId)}&folder_name=${encodeURIComponent(folderName)}`;
+  const qs = wellQs(mountId, batch, folderName);
   const r = await fetch(`/api/well?${qs}`);
   const data = await r.json();
   if (!r.ok) { setStatus("err", data.detail || r.statusText); return; }
@@ -69,7 +73,7 @@ export async function openWell(mountId, folderName) {
       for (const [k, v] of Object.entries(vd.overrides || {})) {
         state.validation[parseInt(k)] = !!v;
       }
-      state.humanValidatedByWell.set(state.well.folder_name, !!vd.human_validated);
+      state.humanValidatedByWell.set(openWellKey(), !!vd.human_validated);
     }
   } catch (e) {}
   renderAllTracks();
@@ -86,7 +90,7 @@ export function renderFilmstrip() {
   if (!state.well) return;
   const a = alignFlag();
   const fs = $("filmstrip");
-  const st = state.cellposeStatus.get(state.well.folder_name);
+  const st = state.cellposeStatus.get(openWellKey());
   const labelsDone = st ? st.labels_done : new Set();
   fs.innerHTML = state.well.timepoints.map((tp, i) => {
     const done = labelsDone.has(tp.label);
@@ -287,8 +291,7 @@ function renderAllTracks() {
   const nAcc = sorted.filter(isTrackAccepted).length;
   $("all-tracks-count").textContent =
     `${nAcc} accepted / ${sorted.length - nAcc} rejected (of ${sorted.length})`;
-  const qs = `mount_id=${encodeURIComponent(state.well.mount_id)}`
-           + `&folder_name=${encodeURIComponent(state.well.folder_name)}`;
+  const qs = openWellQs();
   listEl.innerHTML = sorted.map(t => {
     const hue = (t.id * 137.508) % 360;
     const accepted = isTrackAccepted(t);
@@ -368,7 +371,8 @@ function renderAllTracks() {
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = url;
-        a.download = `${state.well.folder_name.replace(/\s+/g, "_")}_organoid_${id}_${variant}.gif`;
+        a.download = `${state.well.batch.replace(/\s+/g, "_")}_${state.well.folder_name.replace(/\s+/g, "_")}`
+                   + `_organoid_${id}_${variant}.gif`;
         a.click();
         setTimeout(() => URL.revokeObjectURL(url), 60000);
         btn.textContent = "✓";
@@ -383,8 +387,7 @@ function renderAllTracks() {
 
 async function saveValidation() {
   if (!state.well) return;
-  const qs = `mount_id=${encodeURIComponent(state.well.mount_id)}`
-           + `&folder_name=${encodeURIComponent(state.well.folder_name)}`;
+  const qs = openWellQs();
   try {
     await fetch(`/api/track-validation?${qs}`, {
       method: "POST",
@@ -396,7 +399,7 @@ async function saveValidation() {
 
 function refreshValidateButton() {
   if (!state.well) return;
-  const validated = state.humanValidatedByWell.get(state.well.folder_name) === true;
+  const validated = state.humanValidatedByWell.get(openWellKey()) === true;
   const btn = $("validate-well"), statusEl = $("validate-status");
   if (validated) {
     btn.textContent = "Un-validate";
@@ -411,9 +414,7 @@ function refreshValidateButton() {
 
 async function showTrackStitch(trackId) {
   if (!state.well) return;
-  const qs = `mount_id=${encodeURIComponent(state.well.mount_id)}`
-           + `&folder_name=${encodeURIComponent(state.well.folder_name)}`
-           + `&track_id=${trackId}`;
+  const qs = openWellQs() + `&track_id=${trackId}`;
   const wrap = $("track-stitch");
   wrap.hidden = false;
   $("track-stitch-title").textContent = `organoid ${trackId} · loading…`;
@@ -501,10 +502,9 @@ export function initWell() {
 
   $("validate-well").onclick = async () => {
     if (!state.well) return;
-    const validated = state.humanValidatedByWell.get(state.well.folder_name) === true;
+    const validated = state.humanValidatedByWell.get(openWellKey()) === true;
     const next = !validated;
-    const qs = `mount_id=${encodeURIComponent(state.well.mount_id)}`
-             + `&folder_name=${encodeURIComponent(state.well.folder_name)}`;
+    const qs = openWellQs();
     try {
       const r = await fetch(`/api/track-validation?${qs}`, {
         method: "POST",
@@ -512,7 +512,7 @@ export function initWell() {
         body: JSON.stringify({human_validated: next, user: state.user}),
       });
       if (!r.ok) { setStatus("err", `validate: ${r.statusText}`); return; }
-      state.humanValidatedByWell.set(state.well.folder_name, next);
+      state.humanValidatedByWell.set(openWellKey(), next);
       refreshValidateButton();
       if (state.grid) grid.renderThumbGrid(state.grid);
     } catch (e) { setStatus("err", String(e)); }
@@ -555,7 +555,7 @@ export function initWell() {
   $("toggle-align").onchange = async () => {
     if (!state.well) return;
     if (alignFlag()) {
-      const qs = `mount_id=${encodeURIComponent(state.well.mount_id)}&folder_name=${encodeURIComponent(state.well.folder_name)}`;
+      const qs = openWellQs();
       try { await fetch(`/api/well-align?${qs}`); } catch (e) {}
     }
     renderFilmstrip();

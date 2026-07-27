@@ -1,7 +1,7 @@
 // Status polling: keep the grid/viewer in sync with results on disk.
 // Analysis is offshored, so there are no running jobs to poll — uploads and
 // validation are the only things that change state.
-import { state } from "../core/state.js";
+import { state, wellKey } from "../core/state.js";
 import * as grid from "./grid.js";
 import * as well from "./well.js";
 import * as boxplot from "./boxplot.js";
@@ -15,11 +15,12 @@ export async function refreshCellposeStatus() {
     let changed = false;
     const next = new Map();
     for (const w of (data.wells || [])) {
-      const prev = state.cellposeStatus.get(w.folder_name);
+      const k = wellKey(w.batch, w.folder_name);
+      const prev = state.cellposeStatus.get(k);
       if (!prev || prev.n_done !== w.n_done || prev.n_total !== w.n_total) {
         changed = true;
       }
-      next.set(w.folder_name, {
+      next.set(k, {
         n_total: w.n_total,
         n_done: w.n_done,
         labels_done: new Set(w.labels_done || []),
@@ -41,12 +42,13 @@ export async function refreshTrackStatus() {
     const nextVal = new Map();
     let changed = false;
     for (const w of (data.wells || [])) {
-      const prev = state.trackDoneByWell.get(w.folder_name);
-      const prevHv = state.humanValidatedByWell.get(w.folder_name);
+      const k = wellKey(w.batch, w.folder_name);
+      const prev = state.trackDoneByWell.get(k);
+      const prevHv = state.humanValidatedByWell.get(k);
       if (prev !== !!w.done) changed = true;
       if (prevHv !== !!w.human_validated) changed = true;
-      next.set(w.folder_name, !!w.done);
-      nextVal.set(w.folder_name, !!w.human_validated);
+      next.set(k, !!w.done);
+      nextVal.set(k, !!w.human_validated);
     }
     if (state.trackDoneByWell.size !== next.size) changed = true;
     state.trackDoneByWell = next;

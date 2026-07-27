@@ -337,6 +337,27 @@ footer a { color: var(--accent); text-decoration: none; }
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Which batch a row belongs to — only rendered when more than one is shown,
+   so the common single-batch case stays uncluttered. */
+.exp-row-batch {
+  display: block;
+  font: 400 11px var(--mono);
+  color: var(--muted);
+  margin-top: 2px;
+}
+.batch-pick {
+  font: 600 12px var(--mono);
+  color: var(--muted);
+  margin-left: 6px;
+}
+.batch-picker {
+  font: 500 12px var(--mono);
+  color: var(--ink);
+  background: var(--bg);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 4px 6px;
+}
 .exp-row-thumbs { display: flex; gap: 6px; flex-wrap: wrap; }
 .exp-row-thumbs .thumb,
 .exp-row-thumbs .thumb.empty { width: 84px; flex: 0 0 84px; }

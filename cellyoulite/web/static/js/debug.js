@@ -80,8 +80,9 @@ async function loadGrid() {
   wellSel.innerHTML = '';
   for (const w of wells) {
     const opt = document.createElement('option');
-    opt.value = w.mount_id + '|' + w.folder_name;
-    opt.textContent = w.folder_name;
+    opt.value = [w.mount_id, w.batch, w.folder_name].join('|');
+    // Well names repeat across batches, so name the batch in the list.
+    opt.textContent = `${w.batch} · ${w.folder_name}`;
     wellSel.appendChild(opt);
   }
   if (wells.length) loadWell();
@@ -89,8 +90,9 @@ async function loadGrid() {
 
 async function loadWell() {
   if (!wellSel.value) return;
-  const [mid, folder] = wellSel.value.split('|');
-  const r = await fetch(`/api/well?mount_id=${encodeURIComponent(mid)}&folder_name=${encodeURIComponent(folder)}`);
+  const [mid, batch, folder] = wellSel.value.split('|');
+  const r = await fetch(`/api/well?mount_id=${encodeURIComponent(mid)}`
+    + `&batch=${encodeURIComponent(batch)}&folder_name=${encodeURIComponent(folder)}`);
   const data = await r.json();
   timepoints = data.timepoints || [];
   tpSel.innerHTML = '';

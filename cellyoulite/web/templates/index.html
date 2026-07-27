@@ -95,6 +95,9 @@
         <input type="file" id="add-seg" accept=".gz,.tgz,.tar.gz" hidden>
       </label>
       <button id="download-images" class="filebtn" title="download raw images for chosen experiments">Download images…</button>
+      <label class="batch-pick" id="batch-pick-label" for="batch-picker" hidden>Batch</label>
+      <select id="batch-picker" class="batch-picker"
+              title="show one batch, or all of them" hidden></select>
       <span id="data-status" class="hint"></span>
     </div>
     <div class="pills" id="grid-pills" hidden></div>

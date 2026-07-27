@@ -332,6 +332,7 @@ def grid(batch: str | None = None) -> dict:
                     "replicate": w.replicate,
                     "folder_name": w.folder_name,
                     "position": w.position,
+                    "source_dir": w.source_dir,
                     "n_timepoints": len(w.timepoints),
                     "thumb_key": _prefixed_key(mount, b["name"], thumb.key)
                                  if thumb else None,
@@ -361,6 +362,7 @@ def well(mount_id: str, batch: str, folder_name: str) -> dict:
         "replicate": w.replicate,
         "folder_name": w.folder_name,
         "position": w.position,
+        "source_dir": w.source_dir,
         "timepoints": [
             {"t_idx": i, "minutes": tp.minutes, "label": tp.label,
              "key": _prefixed_key(mount, batch, tp.key)}
