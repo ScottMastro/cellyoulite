@@ -66,13 +66,13 @@ def _v3(conn) -> None:
         conn.execute("""
             CREATE TABLE batch (
               id         INTEGER PRIMARY KEY,
-              name       TEXT NOT NULL UNIQUE,   -- e.g. "CA1 (May 2026)"
+              name       TEXT NOT NULL UNIQUE,   -- e.g. "CA1 T1"
               created_at TEXT NOT NULL
             )""")
         # Every pre-batch well came from the one May 2026 CA1 plate.
         cur = conn.execute(
             "INSERT INTO batch(name, created_at) VALUES(?, ?)",
-            ("CA1 (May 2026)", _now()))
+            ("CA1 T1", _now()))
         batch_id = cur.lastrowid
 
         conn.execute("""

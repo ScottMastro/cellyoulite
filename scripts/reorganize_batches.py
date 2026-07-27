@@ -13,8 +13,8 @@ of those roots gains a batch directory:
 
 Run once per existing dataset, with the service stopped:
 
-    python -m scripts.reorganize_batches --batch "CA1 (May 2026)"   # dry run
-    python -m scripts.reorganize_batches --batch "CA1 (May 2026)" --apply
+    python -m scripts.reorganize_batches --batch "CA1 T1"   # dry run
+    python -m scripts.reorganize_batches --batch "CA1 T1" --apply
 
 Alignment caches are NOT moved: .align_cache entries are named
 <well>__<fingerprint>, and the fingerprint already differs between batches, so
@@ -46,7 +46,7 @@ def _pending(root: Path, batch: str) -> list[Path]:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--batch", required=True,
-                    help='batch to move the existing data under, e.g. "CA1 (May 2026)"')
+                    help='batch to move the existing data under, e.g. "CA1 T1"')
     ap.add_argument("--apply", action="store_true",
                     help="actually move (default: report what would move)")
     args = ap.parse_args()

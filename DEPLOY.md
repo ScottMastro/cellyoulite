@@ -35,8 +35,8 @@ cp cellyoulite.db "cellyoulite.db.pre-v3-$(date +%Y%m%d-%H%M%S)"
 
 sudo -u cellyoulite git pull
 # Dry run first — prints what would move, changes nothing.
-sudo -u cellyoulite python -m scripts.reorganize_batches --batch "CA1 (May 2026)"
-sudo -u cellyoulite python -m scripts.reorganize_batches --batch "CA1 (May 2026)" --apply
+sudo -u cellyoulite python -m scripts.reorganize_batches --batch "CA1 T1"
+sudo -u cellyoulite python -m scripts.reorganize_batches --batch "CA1 T1" --apply
 
 sudo systemctl start cellyoulite          # migrations v3 + v4 run here
 sudo -u cellyoulite python -m scripts.import_annotations
@@ -70,7 +70,7 @@ absent, so it never clobbers later decisions.
 ```bash
 cd /opt/cellyoulite
 sudo -u cellyoulite env CELLYOULITE_DATA=/opt/cellyoulite/data \
-  python -m scripts.backfill_db --batch "CA1 (May 2026)"
+  python -m scripts.backfill_db --batch "CA1 T1"
 # prints e.g. backfill complete: {'well': 21, 'alignment': 21, 'track': ...}
 ```
 

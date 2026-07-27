@@ -1671,13 +1671,13 @@ def _hue_for_track(track_id: int) -> tuple[int, int, int]:
     return int((b + m) * 255), int((g + m) * 255), int((r + m) * 255)
 
 
-def _label_to_track(mount, well, t_idx, masks):
-    """Map mask instance label → (track_id, valid) for the given frame, by
-    looking up which track owns each instance based on its centroid."""
-    data = _load_tracks(well.folder_name)
+def _label_to_track(mount, batch, well, t_idx, masks):
+    """Map mask instance label → (organoid id, valid) for the given frame, by
+    looking up which organoid owns each instance based on its centroid."""
+    data = _load_tracks(batch, well.folder_name)
     if data is None:
         return {}
-    overrides = _load_validation(well.folder_name)
+    overrides = _load_validation(batch, well.folder_name)
     # Pull this frame's detections by t_idx for fast lookup.
     frame_dets = []  # [(cx, cy, track_id, accepted)]
     for t in data.get("tracks", []):
@@ -1763,7 +1763,7 @@ def cellpose_edges(key: str, aligned: int = 1, by_track: int = 1,
     bgra = np.zeros((h, w, 4), dtype=np.uint8)
 
     if by_track:
-        lab2tr = _label_to_track(mount, well, t_idx, masks)
+        lab2tr = _label_to_track(mount, batch, well, t_idx, masks)
         fill_a = max(0, min(255, int(fill_alpha)))
         for lab in np.unique(masks):
             if lab == 0:

@@ -12,7 +12,7 @@ may not have happened yet:
 
 A flat tree needs --batch to say which batch its wells belong to.
 
-    python -m scripts.import_annotations --batch "CA1 (May 2026)"
+    python -m scripts.import_annotations --batch "CA1 T1"
     python -m scripts.import_annotations            # batched tree
 
 Existing rows are left alone unless --replace is given: these are authored and

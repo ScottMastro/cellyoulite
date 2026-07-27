@@ -131,7 +131,7 @@ def test_v3_preserves_well_ids_so_children_still_resolve(v2_db):
 def test_v3_puts_existing_wells_in_one_named_batch(v2_db):
     mig.migrate()
     conn = _open(v2_db)
-    assert conn.execute("SELECT name FROM batch").fetchall() == [("CA1 (May 2026)",)]
+    assert conn.execute("SELECT name FROM batch").fetchall() == [("CA1 T1",)]
     assert conn.execute(
         "SELECT COUNT(*) FROM well WHERE batch_id=(SELECT id FROM batch)"
     ).fetchone()[0] == 2
@@ -142,8 +142,8 @@ def test_v3_scopes_folder_name_to_its_batch(v2_db):
     """The point of the migration: a second batch may reuse "DMSO r1"."""
     mig.migrate()
     conn = _open(v2_db)
-    conn.execute("INSERT INTO batch(name,created_at) VALUES('2026-07-22','t')")
-    b2 = conn.execute("SELECT id FROM batch WHERE name='2026-07-22'").fetchone()[0]
+    conn.execute("INSERT INTO batch(name,created_at) VALUES('CA1 T2','t')")
+    b2 = conn.execute("SELECT id FROM batch WHERE name='CA1 T2'").fetchone()[0]
 
     conn.execute("INSERT INTO well(batch_id,folder_name,first_seen) "
                  "VALUES(?,'DMSO r1','t')", (b2,))
@@ -189,27 +189,27 @@ def test_v4_stores_annotations_against_the_well(v2_db, monkeypatch):
     monkeypatch.setenv("CELLYOULITE_DB", str(v2_db))
     mig.migrate()
 
-    repo.set_annotation("CA1 (May 2026)", "DMSO r1", "00d00h00m",
+    repo.set_annotation("CA1 T1", "DMSO r1", "00d00h00m",
                         [{"cx": 10.0, "cy": 20.0, "r": 5.0, "star": True},
                          {"cx": 30.0, "cy": 40.0, "r": 6.0}],
                         aligned=True, source_key="m_x/b/DMSO r1/a.tif",
                         image_w=100, image_h=80)
-    repo.set_annotation("2026-07-22", "DMSO r1", "00d00h00m",
+    repo.set_annotation("CA1 T2", "DMSO r1", "00d00h00m",
                         [{"cx": 99.0, "cy": 99.0, "r": 9.0}])
 
-    may = repo.get_annotation("CA1 (May 2026)", "DMSO r1", "00d00h00m")
-    jul = repo.get_annotation("2026-07-22", "DMSO r1", "00d00h00m")
+    may = repo.get_annotation("CA1 T1", "DMSO r1", "00d00h00m")
+    jul = repo.get_annotation("CA1 T2", "DMSO r1", "00d00h00m")
     assert [c["cx"] for c in may["circles"]] == [10.0, 30.0]   # draw order kept
     assert may["circles"][0]["star"] is True
     assert may["aligned"] is True and may["image_w"] == 100
     assert [c["cx"] for c in jul["circles"]] == [99.0]
-    assert repo.get_annotation("CA1 (May 2026)", "FSK r1", "00d00h00m") is None
+    assert repo.get_annotation("CA1 T1", "FSK r1", "00d00h00m") is None
 
 
 def test_v4_annotation_write_replaces_only_that_frame(v2_db, monkeypatch):
     monkeypatch.setenv("CELLYOULITE_DB", str(v2_db))
     mig.migrate()
-    b = "CA1 (May 2026)"
+    b = "CA1 T1"
     repo.set_annotation(b, "DMSO r1", "00d00h00m", [{"cx": 1.0, "cy": 1.0, "r": 1.0}])
     repo.set_annotation(b, "DMSO r1", "00d00h15m", [{"cx": 2.0, "cy": 2.0, "r": 2.0}])
     # Re-drawing one frame must not disturb the other.
@@ -218,13 +218,13 @@ def test_v4_annotation_write_replaces_only_that_frame(v2_db, monkeypatch):
     assert len(repo.get_annotation(b, "DMSO r1", "00d00h00m")["circles"]) == 2
     assert repo.get_annotation(b, "DMSO r1", "00d00h15m")["circles"][0]["cx"] == 2.0
     assert len(repo.list_annotations(b)) == 2
-    assert len(repo.list_annotations("2026-07-22")) == 0
+    assert len(repo.list_annotations("CA1 T2")) == 0
 
 
 def test_v4_annotations_cascade_with_their_well(v2_db, monkeypatch):
     monkeypatch.setenv("CELLYOULITE_DB", str(v2_db))
     mig.migrate()
-    repo.set_annotation("CA1 (May 2026)", "DMSO r1", "00d00h00m",
+    repo.set_annotation("CA1 T1", "DMSO r1", "00d00h00m",
                         [{"cx": 1.0, "cy": 1.0, "r": 1.0}])
     conn = _open(v2_db)
     conn.execute("DELETE FROM well WHERE folder_name='DMSO r1'")

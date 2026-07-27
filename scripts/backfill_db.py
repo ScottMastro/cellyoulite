@@ -3,7 +3,7 @@
 Reads the pre-batch *flat* layout (tracks/<well>.json, data/<well>/), so it
 imports one batch at a time and needs to be told which:
 
-    python scripts/backfill_db.py --batch "CA1 (May 2026)"
+    python scripts/backfill_db.py --batch "CA1 T1"
 
 Reproducible caches (alignment, organoids, detections) are upserted. Authored
 curation (organoid filters, well sign-off, users) is inserted only if absent,
@@ -39,7 +39,7 @@ def _data_dir() -> Path:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--batch", required=True,
-                    help='batch these wells belong to, e.g. "CA1 (May 2026)"')
+                    help='batch these wells belong to, e.g. "CA1 T1"')
     args = ap.parse_args()
     batch = args.batch
 
