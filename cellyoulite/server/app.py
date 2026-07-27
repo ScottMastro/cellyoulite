@@ -306,16 +306,21 @@ def grid(batch: str | None = None) -> dict:
     mounts = _mounts()
     if not mounts:
         return {"treatments": [], "replicates": [], "n_wells": 0, "n_images": 0,
-                "wells": [], "mounts": [], "batches": [], "batch": batch}
+                "wells": [], "mounts": [], "batches": [], "batch_counts": {},
+                "batch": batch}
 
     wells: list[dict] = []
     treatments: set[str] = set()
     replicates: set[int] = set()
     names: list[str] = []
+    # Every batch's size, regardless of the filter — the batch tabs show these,
+    # and they must not change as you click between them.
+    counts: dict[str, int] = {}
     n_images = 0
     for mount in mounts:
         for b in _batches_for_mount(mount):
             names.append(b["name"])
+            counts[b["name"]] = len(b["spec"].wells)
             if batch is not None and b["name"] != batch:
                 continue
             spec = b["spec"]
@@ -347,6 +352,7 @@ def grid(batch: str | None = None) -> dict:
         "wells": wells,
         "mounts": mounts,
         "batches": names,
+        "batch_counts": counts,
         "batch": batch,
     }
 

@@ -15,9 +15,10 @@ export async function refreshGrid() {
     if (!r.ok) throw new Error(data.detail || r.statusText);
     state.grid = data;
     state.batches = data.batches || [];
+    state.batchCounts = data.batch_counts || {};
     // A batch that has gone away (renamed on disk) falls back to "all".
     if (state.batch && !state.batches.includes(state.batch)) state.batch = null;
-    renderBatchPicker();
+    renderBatchTabs();
     renderPills("grid-pills", [
       ["treatments", data.treatments.length],
       ["replicates", data.replicates.length],
@@ -32,23 +33,28 @@ export async function refreshGrid() {
   }
 }
 
-export function renderBatchPicker() {
-  const el = $("batch-picker");
+export function renderBatchTabs() {
+  const el = $("batch-tabs");
   if (!el) return;
-  // Nothing to choose between until a second batch exists.
-  const hide = state.batches.length < 2;
-  el.hidden = hide;
-  if ($("batch-pick-label")) $("batch-pick-label").hidden = hide;
-  if (hide) return;
-  const opts = [`<option value="">All batches</option>`].concat(
-    state.batches.map(b =>
-      `<option value="${escapeHtml(b)}"${b === state.batch ? " selected" : ""}>${escapeHtml(b)}</option>`)
-  );
-  el.innerHTML = opts.join("");
-  el.onchange = () => {
-    state.batch = el.value || null;
-    refreshGrid();
-  };
+  // Nothing to filter between until a second batch exists.
+  el.hidden = state.batches.length < 2;
+  if (el.hidden) return;
+
+  const total = Object.values(state.batchCounts).reduce((a, b) => a + b, 0);
+  const tab = (value, label, n) =>
+    `<button class="batch-tab${value === state.batch ? " active" : ""}"`
+    + ` data-batch="${value === null ? "" : escapeHtml(value)}"`
+    + ` title="${escapeHtml(label)} — ${n} well${n === 1 ? "" : "s"}">`
+    + `${escapeHtml(label)}<span class="batch-tab-n">${n}</span></button>`;
+
+  el.innerHTML = [tab(null, "All", total)].concat(
+    state.batches.map(b => tab(b, b, state.batchCounts[b] ?? 0))).join("");
+  el.querySelectorAll(".batch-tab").forEach(b => {
+    b.onclick = () => {
+      state.batch = b.dataset.batch || null;
+      refreshGrid();
+    };
+  });
 }
 
 function thumbHtml(w, treatment) {
