@@ -5,28 +5,58 @@ from __future__ import annotations
 from .connection import connect
 from .connection import now_iso as _now
 
-# ---------------------------- wells / tracks ----------------------------
+# ---------------------------- batches ----------------------------
 
-def ensure_well(conn, folder_name: str, treatment=None, replicate=None) -> int:
+def ensure_batch(conn, name: str) -> int:
+    """Get a batch's id, creating the batch if this is the first well from it."""
+    conn.execute("INSERT INTO batch(name,created_at) VALUES(?,?) "
+                 "ON CONFLICT(name) DO NOTHING", (name, _now()))
+    return conn.execute("SELECT id FROM batch WHERE name=?", (name,)).fetchone()["id"]
+
+
+def list_batches() -> list[str]:
+    conn = connect()
+    try:
+        return [r["name"] for r in conn.execute(
+            "SELECT name FROM batch ORDER BY name COLLATE NOCASE")]
+    finally:
+        conn.close()
+
+
+# ---------------------------- wells / organoids ----------------------------
+
+def ensure_well(conn, batch: str, folder_name: str,
+                treatment=None, replicate=None) -> int:
+    bid = ensure_batch(conn, batch)
     # COALESCE keeps any existing treatment/replicate when the caller passes None.
     conn.execute(
-        "INSERT INTO well(folder_name,treatment,replicate,first_seen) VALUES(?,?,?,?) "
-        "ON CONFLICT(folder_name) DO UPDATE SET "
+        "INSERT INTO well(batch_id,folder_name,treatment,replicate,first_seen) "
+        "VALUES(?,?,?,?,?) "
+        "ON CONFLICT(batch_id,folder_name) DO UPDATE SET "
         "treatment=COALESCE(excluded.treatment, well.treatment), "
         "replicate=COALESCE(excluded.replicate, well.replicate)",
-        (folder_name, treatment, replicate, _now()))
-    return conn.execute("SELECT id FROM well WHERE folder_name=?", (folder_name,)).fetchone()["id"]
+        (bid, folder_name, treatment, replicate, _now()))
+    return conn.execute("SELECT id FROM well WHERE batch_id=? AND folder_name=?",
+                        (bid, folder_name)).fetchone()["id"]
+
+
+def _well_id(conn, batch: str, folder_name: str) -> int | None:
+    """Look up a well without creating it (or its batch). None if unknown."""
+    r = conn.execute(
+        "SELECT w.id FROM well w JOIN batch b ON b.id=w.batch_id "
+        "WHERE b.name=? AND w.folder_name=?", (batch, folder_name)).fetchone()
+    return r["id"] if r else None
 
 
 # ---------------------------- ingestion (analysis results -> rows) ----------------------------
 
-def set_alignment(folder_name: str, fingerprint: str, cache_version: int,
-                  canvas_h: int, canvas_w: int, offsets, placements,
-                  treatment=None, replicate=None) -> None:
+def set_alignment(batch: str, folder_name: str, fingerprint: str,
+                  cache_version: int, canvas_h: int, canvas_w: int,
+                  offsets, placements, treatment=None, replicate=None) -> None:
     conn = connect()
     try:
         import json
-        wid = ensure_well(conn, folder_name, treatment, replicate)
+        wid = ensure_well(conn, batch, folder_name, treatment, replicate)
         conn.execute(
             "INSERT INTO alignment(well_id,fingerprint,cache_version,canvas_h,canvas_w,"
             "offsets,placements,created_at) VALUES(?,?,?,?,?,?,?,?) "
@@ -41,14 +71,14 @@ def set_alignment(folder_name: str, fingerprint: str, cache_version: int,
         conn.close()
 
 
-def set_tracks(folder_name: str, tracks_data: dict, source_fingerprint=None,
-               treatment=None, replicate=None) -> int:
-    """Ingest a well's tracks + detections (the tracks JSON shape). Upserts
-    track cache rows and replaces their detections; authored track_filter and
-    stars are preserved (only cache columns change)."""
+def set_tracks(batch: str, folder_name: str, tracks_data: dict,
+               source_fingerprint=None, treatment=None, replicate=None) -> int:
+    """Ingest a well's organoids + detections (the tracks JSON shape). Upserts
+    cache rows and replaces their detections; authored track_filter and stars
+    are preserved (only cache columns change)."""
     conn = connect()
     try:
-        wid = ensure_well(conn, folder_name, treatment, replicate)
+        wid = ensure_well(conn, batch, folder_name, treatment, replicate)
         n = 0
         for t in tracks_data.get("tracks", []):
             # Fixed-id anchor = the organoid's first-frame centroid.
@@ -84,7 +114,7 @@ def set_tracks(folder_name: str, tracks_data: dict, source_fingerprint=None,
         conn.close()
 
 
-def get_alignment(folder_name: str) -> dict | None:
+def get_alignment(batch: str, folder_name: str) -> dict | None:
     """The alignment row for a well (fingerprint, cache_version, canvas, and
     JSON offsets/placements), or None."""
     conn = connect()
@@ -92,24 +122,25 @@ def get_alignment(folder_name: str) -> dict | None:
         r = conn.execute(
             "SELECT a.fingerprint, a.cache_version, a.canvas_h, a.canvas_w, "
             "a.offsets, a.placements FROM alignment a JOIN well w ON w.id=a.well_id "
-            "WHERE w.folder_name=?", (folder_name,)).fetchone()
+            "JOIN batch b ON b.id=w.batch_id "
+            "WHERE b.name=? AND w.folder_name=?", (batch, folder_name)).fetchone()
         return dict(r) if r else None
     finally:
         conn.close()
 
 
-def get_tracks(folder_name: str) -> dict | None:
+def get_tracks(batch: str, folder_name: str) -> dict | None:
     """Reconstruct the tracks payload (matching the JSON shape) from the DB,
-    or None if the well has no tracks. Includes per-track `starred`."""
+    or None if the well has no organoids. Includes per-organoid `starred`."""
     conn = connect()
     try:
-        w = conn.execute("SELECT id FROM well WHERE folder_name=?", (folder_name,)).fetchone()
-        if not w:
+        wid = _well_id(conn, batch, folder_name)
+        if wid is None:
             return None
         trows = conn.execute(
             "SELECT id,track_num,n_detections,first_t,last_t,auto_valid,edge_clipped,"
             "starred,anchor_cx,anchor_cy "
-            "FROM track WHERE well_id=? ORDER BY track_num", (w["id"],)).fetchall()
+            "FROM track WHERE well_id=? ORDER BY track_num", (wid,)).fetchall()
         if not trows:
             return None
         tracks, n_frames = [], 0
@@ -147,32 +178,32 @@ def _ensure_track(conn, well_id: int, track_num: int) -> int:
 
 # ---------------------------- validation ----------------------------
 
-def get_validation(folder_name: str) -> dict:
+def get_validation(batch: str, folder_name: str) -> dict:
     """{"overrides": {track_num:int -> bool}, "human_validated": bool}."""
     conn = connect()
     try:
-        w = conn.execute("SELECT id FROM well WHERE folder_name=?", (folder_name,)).fetchone()
-        if not w:
+        wid = _well_id(conn, batch, folder_name)
+        if wid is None:
             return {"overrides": {}, "human_validated": False}
         rows = conn.execute(
             "SELECT t.track_num AS num, f.accepted AS acc FROM track_filter f "
-            "JOIN track t ON t.id = f.track_id WHERE t.well_id=?", (w["id"],)).fetchall()
+            "JOIN track t ON t.id = f.track_id WHERE t.well_id=?", (wid,)).fetchall()
         overrides = {r["num"]: bool(r["acc"]) for r in rows}
         wv = conn.execute("SELECT validated FROM well_validation WHERE well_id=?",
-                          (w["id"],)).fetchone()
+                          (wid,)).fetchone()
         return {"overrides": overrides,
                 "human_validated": bool(wv["validated"]) if wv else False}
     finally:
         conn.close()
 
 
-def set_overrides(folder_name: str, overrides: dict, decided_by: str,
+def set_overrides(batch: str, folder_name: str, overrides: dict, decided_by: str,
                   reason: str = "manual") -> int:
-    """Replace the per-track filter decisions for a well (full-replace, matching
-    the POST semantics). Records who decided and when."""
+    """Replace the per-organoid filter decisions for a well (full-replace,
+    matching the POST semantics). Records who decided and when."""
     conn = connect()
     try:
-        wid = ensure_well(conn, folder_name)
+        wid = ensure_well(conn, batch, folder_name)
         conn.execute(
             "DELETE FROM track_filter WHERE track_id IN (SELECT id FROM track WHERE well_id=?)",
             (wid,))
@@ -189,10 +220,10 @@ def set_overrides(folder_name: str, overrides: dict, decided_by: str,
         conn.close()
 
 
-def set_human_validated(folder_name: str, validated: bool, by: str) -> bool:
+def set_human_validated(batch: str, folder_name: str, validated: bool, by: str) -> bool:
     conn = connect()
     try:
-        wid = ensure_well(conn, folder_name)
+        wid = ensure_well(conn, batch, folder_name)
         conn.execute(
             "INSERT INTO well_validation(well_id,validated,validated_by,validated_at) "
             "VALUES(?,?,?,?) ON CONFLICT(well_id) DO UPDATE SET validated=excluded.validated,"
@@ -204,36 +235,38 @@ def set_human_validated(folder_name: str, validated: bool, by: str) -> bool:
         conn.close()
 
 
-def human_validated_map() -> dict:
-    """folder_name -> bool for every well with a sign-off row (for status polls)."""
+def human_validated_map(batch: str) -> dict:
+    """folder_name -> bool for every signed-off well in a batch (status polls)."""
     conn = connect()
     try:
         return {r["folder_name"]: bool(r["validated"]) for r in conn.execute(
             "SELECT w.folder_name, v.validated FROM well_validation v "
-            "JOIN well w ON w.id = v.well_id")}
+            "JOIN well w ON w.id = v.well_id JOIN batch b ON b.id = w.batch_id "
+            "WHERE b.name=?", (batch,))}
     finally:
         conn.close()
 
 
-# ---------------------------- track stars ----------------------------
+# ---------------------------- organoid stars ----------------------------
 
-def get_stars(folder_name: str) -> dict:
-    """track_num -> True for every starred track in the well."""
+def get_stars(batch: str, folder_name: str) -> dict:
+    """track_num -> True for every starred organoid in the well."""
     conn = connect()
     try:
-        w = conn.execute("SELECT id FROM well WHERE folder_name=?", (folder_name,)).fetchone()
-        if not w:
+        wid = _well_id(conn, batch, folder_name)
+        if wid is None:
             return {}
         return {r["track_num"]: True for r in conn.execute(
-            "SELECT track_num FROM track WHERE well_id=? AND starred=1", (w["id"],))}
+            "SELECT track_num FROM track WHERE well_id=? AND starred=1", (wid,))}
     finally:
         conn.close()
 
 
-def set_star(folder_name: str, track_num: int, starred: bool, by: str) -> bool:
+def set_star(batch: str, folder_name: str, track_num: int, starred: bool,
+             by: str) -> bool:
     conn = connect()
     try:
-        wid = ensure_well(conn, folder_name)
+        wid = ensure_well(conn, batch, folder_name)
         tid = _ensure_track(conn, wid, int(track_num))
         if starred:
             conn.execute("UPDATE track SET starred=1, starred_by=?, starred_at=? WHERE id=?",
