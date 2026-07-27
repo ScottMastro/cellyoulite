@@ -20,11 +20,18 @@ from starlette.requests import Request
 from cellyoulite.__version__ import __version__
 from cellyoulite.db import repo
 from cellyoulite.io.grid import (
-    discover_grid, is_experiment_dir, is_image_name,
+    discover_grid,
+    is_experiment_dir,
+    is_image_name,
 )
+from cellyoulite.io.ingest import ingest_batch
 from cellyoulite.pipeline.align import (
-    WellAlignment, compute_alignment_cached, is_alignment_cached, paste_onto_canvas,
-    _CACHE_VERSION, _fingerprint,
+    _CACHE_VERSION,
+    WellAlignment,
+    _fingerprint,
+    compute_alignment_cached,
+    is_alignment_cached,
+    paste_onto_canvas,
 )
 
 _WEB = Path(__file__).resolve().parent.parent / "web"
@@ -586,7 +593,10 @@ def track_status() -> dict:
 
 @app.post("/api/track-run")
 def track_run(min_frac: float = 0.75) -> dict:
-    import subprocess, sys, threading, time as _t
+    import subprocess
+    import sys
+    import threading
+    import time as _t
     global _track_job_lock
     if _track_job_lock is None:
         _track_job_lock = threading.Lock()
@@ -1054,6 +1064,7 @@ def well_gif(mount_id: str, batch: str, folder_name: str,
     aligned canvas naturally pads with black where frames have shifted, so
     that shows up as borders in the GIF."""
     import io
+
     import imageio.v2 as imageio
 
     mount, well = _find_well(mount_id, batch, folder_name)
@@ -1351,35 +1362,11 @@ def _ingest_results_to_db(batch: str) -> dict:
     tracks/detections into DB rows (the cellpose mask PNGs stay on disk). This
     is what makes "Add segmentation data" an upload to the database.
 
-    Wells are re-discovered from data/<batch> rather than taken from the
-    bundle's file names: a plate folder holds several positions, so its
-    directory name is not a well name."""
-    bdir = _data_dir() / _safe_name(batch)
-    if not bdir.is_dir():
-        return {"db_alignments": 0, "db_tracks": 0}
-    n_align = n_tracks = 0
-    for w in discover_grid(bdir).wells:
-        paths = [tp.path for tp in w.timepoints]
-        if paths and is_alignment_cached(paths):
-            al = compute_alignment_cached(paths)
-            repo.set_alignment(
-                batch, w.folder_name, _fingerprint(paths), _CACHE_VERSION,
-                al.canvas_shape[0], al.canvas_shape[1],
-                [list(o) for o in al.offsets], [list(p) for p in al.placements],
-                treatment=w.treatment, replicate=w.replicate)
-            n_align += 1
-        tpath = _tracks_json(batch, w.folder_name)
-        if tpath.is_file():
-            try:
-                tdata = json.loads(tpath.read_text())
-            except (OSError, ValueError):
-                tdata = None
-            if tdata:
-                src = _fingerprint(paths) if paths else None
-                n_tracks += repo.set_tracks(batch, w.folder_name, tdata, src,
-                                            treatment=w.treatment,
-                                            replicate=w.replicate)
-    return {"db_alignments": n_align, "db_tracks": n_tracks}
+    The work lives in io/ingest so scripts/ingest_results.py can do the same
+    thing without going through an upload — this route buffers the whole
+    bundle in memory, which a small host cannot afford."""
+    out = ingest_batch(batch, _data_dir(), _TRACKS_ROOT)
+    return {"db_alignments": out["db_alignments"], "db_tracks": out["db_tracks"]}
 
 
 @app.post("/api/upload-images")
@@ -1515,7 +1502,10 @@ def align_status() -> dict:
 
 @app.post("/api/align-run")
 def align_run(force: bool = False) -> dict:
-    import subprocess, sys, threading, time as _t
+    import subprocess
+    import sys
+    import threading
+    import time as _t
     global _align_job_lock
     if _align_job_lock is None:
         _align_job_lock = threading.Lock()
