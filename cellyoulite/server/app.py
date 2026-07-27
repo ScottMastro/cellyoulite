@@ -1105,23 +1105,32 @@ def well_gif(mount_id: str, batch: str, folder_name: str,
         if mask_path.is_file() and i in per_frame_tracks:
             masks = cv2.imread(str(mask_path), cv2.IMREAD_UNCHANGED)
             if masks is not None and masks.shape == canvas.shape[:2]:
+                # One boundary pass and one hue lookup table for the frame.
+                # Doing `masks == lab` and find_boundaries per organoid meant a
+                # well with 96 organoids over 20 frames ran ~1900 full-image
+                # boundary computations, which took minutes.
+                counts = np.bincount(masks.ravel())
+                n_lab = counts.size
+                drawn = np.zeros(n_lab, dtype=bool)
+                hue_lut = np.zeros((n_lab, 3), dtype=np.float32)
                 for entry in per_frame_tracks[i]:
                     cx, cy = int(round(entry["cx"])), int(round(entry["cy"]))
                     if not (0 <= cx < masks.shape[1] and 0 <= cy < masks.shape[0]):
                         continue
                     lab = int(masks[cy, cx])
-                    if lab == 0:
+                    if lab == 0 or lab >= n_lab or counts[lab] == 0:
                         continue
-                    inst = masks == lab
-                    if not inst.any():
-                        continue
-                    canvas[inst] = canvas[inst] * (1 - fill_alpha) + entry["hue"] * fill_alpha
-                    bnd = find_boundaries(inst, mode="thick")
-                    canvas[bnd] = entry["hue"]
+                    drawn[lab] = True
+                    hue_lut[lab] = entry["hue"]
                     # Equivalent radius for label sizing.
-                    n_inst = int(inst.sum())
-                    r_eq = int(round((n_inst / 3.14159) ** 0.5))
+                    r_eq = int(round((int(counts[lab]) / 3.14159) ** 0.5))
                     label_jobs.append((cx, cy, entry["track_id"], entry["hue"], r_eq))
+                sel = drawn[masks]
+                if sel.any():
+                    hues = hue_lut[masks[sel]]
+                    canvas[sel] = canvas[sel] * (1 - fill_alpha) + hues * fill_alpha
+                    bnd = find_boundaries(masks, mode="thick") & sel
+                    canvas[bnd] = hue_lut[masks[bnd]]
 
         # Timestamp strip on the bottom-right corner.
         out = np.clip(canvas, 0, 255).astype(np.uint8)

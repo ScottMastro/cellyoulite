@@ -531,6 +531,36 @@ export function initWell() {
     btn.title = on ? "exit fullscreen (Esc)" : "fullscreen";
     syncChooserHeight();
   };
+  // Whole-well GIF: every aligned frame, organoids coloured. Rendered on
+  // demand and not cached — tens of seconds for a dense well — so the button
+  // says what it's doing rather than just going quiet.
+  $("well-gif").onclick = async () => {
+    if (!state.well) return;
+    const btn = $("well-gif");
+    const orig = btn.textContent;
+    btn.disabled = true; btn.textContent = "rendering…";
+    try {
+      // Follow the viewer's own toggles, so the GIF matches what's on screen.
+      const acceptedOnly = $("toggle-deactivated").checked ? 0 : 1;
+      const labels = $("toggle-ids").checked ? 1 : 0;
+      const r = await fetch(`/api/well-gif?${openWellQs()}`
+                            + `&accepted_only=${acceptedOnly}&labels=${labels}`);
+      if (!r.ok) throw new Error(r.statusText);
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${state.well.batch.replace(/\s+/g, "_")}`
+                 + `_${state.well.folder_name.replace(/\s+/g, "_")}_aligned.gif`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      btn.textContent = "✓";
+    } catch (err) {
+      btn.textContent = "error";
+    }
+    setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 1200);
+  };
+
   $("viewer-fs").onclick = () => setFullscreen(!$("well-card").classList.contains("fs"));
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && $("well-card").classList.contains("fs")) setFullscreen(false);
