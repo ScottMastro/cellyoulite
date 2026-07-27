@@ -345,6 +345,20 @@ footer a { color: var(--accent); text-decoration: none; }
   color: var(--muted);
   margin-top: 2px;
 }
+/* Batch chooser inside the download dialog. The tabs pick what you're
+   looking at; this picks what you're exporting, which may differ when the
+   list is showing "All". */
+.batch-pick { font: 600 12px var(--mono); color: var(--muted); margin-left: 10px; }
+.batch-picker {
+  font: 500 12px var(--mono);
+  color: var(--ink);
+  background: var(--bg);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  padding: 4px 6px;
+  margin-left: 6px;
+}
+
 /* Batch filter above the well list. Same idiom as .app-tab, but batch names
    are proper nouns and can be long, so no uppercasing and the row wraps. */
 .batch-tabs {

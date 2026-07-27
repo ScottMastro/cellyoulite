@@ -9,9 +9,9 @@ function updateDlCount() {
   $("dl-count").textContent = `${n} selected`;
 }
 
-// Everything on this card reads or writes one batch. Use the grid's selection
-// when there is one, otherwise ask — importing a new dataset is exactly the
-// case where the batch does not exist yet.
+// Uploads and imports may need a batch that does not exist yet, so they ask
+// for a name. Downloads never do — they always target an existing batch, and
+// get a picker inside the dialog instead (see openDownloadModal).
 function askBatch(prompt) {
   if (state.batch) return state.batch;
   if (state.batches.length === 1) return state.batches[0];
@@ -26,12 +26,45 @@ function askBatch(prompt) {
 
 // subset image-download picker (experiments grouped by treatment)
 function openDownloadModal() {
-  const batch = askBatch("Download images from which batch?");
-  if (!batch) return;
-  const all = (state.grid && state.grid.wells) || [];
-  const wells = all.filter(w => w.batch === batch);
-  if (!wells.length) { $("data-status").textContent = "no experiments to download yet"; return; }
+  const batches = state.batches || [];
+  if (!batches.length) { $("data-status").textContent = "no experiments to download yet"; return; }
+  // Default to whatever the list is filtered to; on "All", the first batch.
+  const batch = (state.batch && batches.includes(state.batch)) ? state.batch : batches[0];
+
+  const sel = $("dl-batch");
+  const multi = batches.length > 1;
+  sel.hidden = !multi;
+  $("dl-batch-label").hidden = !multi;
+  if (multi) {
+    sel.innerHTML = batches.map(b =>
+      `<option value="${escapeHtml(b)}"${b === batch ? " selected" : ""}>${escapeHtml(b)}</option>`
+    ).join("");
+    // Switching batch re-lists that batch's experiments in place.
+    sel.onchange = () => renderDownloadList(sel.value);
+  }
+  renderDownloadList(batch);
+  $("dl-modal").classList.remove("hidden");
+}
+
+async function renderDownloadList(batch) {
   $("dl-modal").dataset.batch = batch;
+  let wells = ((state.grid && state.grid.wells) || []).filter(w => w.batch === batch);
+  if (!wells.length) {
+    // The list is filtered to a different batch, so this one's wells aren't
+    // loaded. Fetch just that batch rather than making the user go and switch.
+    $("dl-list").innerHTML = `<div class="hint" style="padding:8px">loading…</div>`;
+    try {
+      const r = await fetch(`/api/grid?batch=${encodeURIComponent(batch)}`);
+      if (r.ok) wells = (await r.json()).wells || [];
+    } catch (e) { /* fall through to the empty message below */ }
+  }
+  if (!wells.length) {
+    $("dl-list").innerHTML =
+      `<div class="hint" style="padding:8px">no experiments in `
+      + `${escapeHtml(batch)}</div>`;
+    updateDlCount();
+    return;
+  }
   const byTreat = {};
   // Download works on source directories, and several wells can share one.
   for (const w of wells) {
@@ -56,7 +89,6 @@ function openDownloadModal() {
       updateDlCount();
     }));
   updateDlCount();
-  $("dl-modal").classList.remove("hidden");
 }
 
 export function initData() {
