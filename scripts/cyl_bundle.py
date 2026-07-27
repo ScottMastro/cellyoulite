@@ -7,7 +7,6 @@ self-contained .tar.gz file:
   .cellpose_cache/     per-frame circles JSON + 16-bit mask PNG sidecar
   tracks/              per-well track JSON, validation overrides, cached
                        per-track stitch PNGs
-  annotations/         hand-drawn ground truth (validation set)
   manifest.json        bundle metadata (created, version, contents)
   data/                (only with --include-raw)
 
@@ -37,8 +36,9 @@ _DEFAULT_DIRS = [
     ".align_cache",
     ".cellpose_cache",
     "tracks",
-    "annotations",
 ]
+# Annotations are not here: hand-drawn ground truth lives in the database
+# (migration v4), so it travels with cellyoulite.db rather than the bundle.
 
 
 def _du_bytes(path: Path) -> int:

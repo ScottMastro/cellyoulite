@@ -280,6 +280,96 @@ def set_star(batch: str, folder_name: str, track_num: int, starred: bool,
         conn.close()
 
 
+# ---------------------------- frame annotations ----------------------------
+# Hand-drawn ground truth, used to score the detectors. Authored and
+# irreplaceable, so writes replace one frame at a time and never cascade.
+
+def get_annotation(batch: str, well: str, label: str) -> dict | None:
+    """One frame's annotation, or None if it was never drawn."""
+    conn = connect()
+    try:
+        wid = _well_id(conn, batch, well)
+        if wid is None:
+            return None
+        a = conn.execute(
+            "SELECT id, aligned, source_key, image_w, image_h FROM annotation "
+            "WHERE well_id=? AND label=?", (wid, label)).fetchone()
+        if not a:
+            return None
+        circles = [
+            {"cx": r["cx"], "cy": r["cy"], "r": r["r"], "star": bool(r["star"])}
+            for r in conn.execute(
+                "SELECT cx, cy, r, star FROM annotation_circle "
+                "WHERE annotation_id=? ORDER BY idx", (a["id"],))]
+        return {"batch": batch, "well": well, "label": label,
+                "aligned": bool(a["aligned"]), "key": a["source_key"],
+                "image_w": a["image_w"], "image_h": a["image_h"],
+                "circles": circles}
+    finally:
+        conn.close()
+
+
+def set_annotation(batch: str, well: str, label: str, circles: list,
+                   aligned: bool = False, source_key=None,
+                   image_w=None, image_h=None) -> int:
+    """Replace one frame's circles. Full-replace, matching the POST semantics
+    (the editor always sends the complete set for that frame)."""
+    conn = connect()
+    try:
+        wid = ensure_well(conn, batch, well)
+        conn.execute(
+            "INSERT INTO annotation(well_id,label,aligned,source_key,image_w,"
+            "image_h,updated_at) VALUES(?,?,?,?,?,?,?) "
+            "ON CONFLICT(well_id,label) DO UPDATE SET aligned=excluded.aligned,"
+            "source_key=excluded.source_key,image_w=excluded.image_w,"
+            "image_h=excluded.image_h,updated_at=excluded.updated_at",
+            (wid, label, int(bool(aligned)), source_key, image_w, image_h, _now()))
+        aid = conn.execute("SELECT id FROM annotation WHERE well_id=? AND label=?",
+                           (wid, label)).fetchone()["id"]
+        conn.execute("DELETE FROM annotation_circle WHERE annotation_id=?", (aid,))
+        conn.executemany(
+            "INSERT INTO annotation_circle(annotation_id,idx,cx,cy,r,star) "
+            "VALUES(?,?,?,?,?,?)",
+            [(aid, i, c["cx"], c["cy"], c["r"], int(bool(c.get("star"))))
+             for i, c in enumerate(circles)])
+        conn.commit()
+        return len(circles)
+    finally:
+        conn.close()
+
+
+def list_annotations(batch: str | None = None) -> list[dict]:
+    """Every annotated frame, newest schema shape. Used by the offline scoring
+    scripts, which compare detector output against this ground truth."""
+    conn = connect()
+    try:
+        sql = ("SELECT a.id, b.name AS batch, w.folder_name AS well, a.label, "
+               "a.aligned, a.source_key, a.image_w, a.image_h "
+               "FROM annotation a JOIN well w ON w.id=a.well_id "
+               "JOIN batch b ON b.id=w.batch_id")
+        params: tuple = ()
+        if batch is not None:
+            sql += " WHERE b.name=?"
+            params = (batch,)
+        sql += " ORDER BY b.name, w.folder_name, a.label"
+        out = []
+        for a in conn.execute(sql, params).fetchall():
+            out.append({
+                "batch": a["batch"], "well": a["well"], "label": a["label"],
+                "aligned": bool(a["aligned"]), "key": a["source_key"],
+                "image_w": a["image_w"], "image_h": a["image_h"],
+                "circles": [
+                    {"cx": r["cx"], "cy": r["cy"], "r": r["r"],
+                     "star": bool(r["star"])}
+                    for r in conn.execute(
+                        "SELECT cx, cy, r, star FROM annotation_circle "
+                        "WHERE annotation_id=? ORDER BY idx", (a["id"],))],
+            })
+        return out
+    finally:
+        conn.close()
+
+
 # ---------------------------- users ----------------------------
 
 def list_users() -> list[str]:

@@ -1,7 +1,7 @@
 """Score Cellpose cache vs manual annotations.
 
 Reads .cellpose_cache/<well>/<label>.json (predictions in aligned-canvas
-coords) and annotations/<well>/<label>.json (ground truth in the same
+coords) and the hand-drawn ground truth in the database (in the same
 coords) and prints precision / recall / ★recall / F1.
 """
 from __future__ import annotations
@@ -11,6 +11,8 @@ from pathlib import Path
 
 import numpy as np
 
+from cellyoulite.db import repo
+from cellyoulite.db.migrate import migrate
 
 MATCH_CENTER_FRAC = 0.5
 MATCH_R_RATIO = 1.6
@@ -42,18 +44,21 @@ def _match(gt, pred):
 
 
 def main():
-    ann_root = Path("annotations")
+    migrate()
     cache_root = Path(".cellpose_cache")
     agg = {"tp": 0, "fp": 0, "fn": 0, "star_tp": 0, "star_fn": 0,
            "ce": [], "re": []}
 
     print(f"{'well':22s} {'label':10s} {'GT':>3s} {'P':>3s} {'TP':>3s} {'FP':>3s} {'FN':>3s} "
           f"{'prec':>5s} {'rec':>5s} {'★rec':>5s} {'Δc':>5s} {'Δr':>5s}")
-    for ann_path in sorted(ann_root.rglob("*.json")):
-        ann = json.loads(ann_path.read_text())
-        well = ann["well"]
-        label = ann["label"]
-        cache_path = cache_root / well.replace("/", "_") / f"{label}.json"
+    annotations = repo.list_annotations()
+    if not annotations:
+        raise SystemExit("no annotations in the database — see "
+                         "scripts/import_annotations.py")
+    for ann in annotations:
+        batch, well, label = ann["batch"], ann["well"], ann["label"]
+        cache_path = (cache_root / batch.replace("/", "_")
+                      / well.replace("/", "_") / f"{label}.json")
         if not cache_path.is_file():
             print(f"{well:22s} {label:10s}  (no cellpose cache)")
             continue

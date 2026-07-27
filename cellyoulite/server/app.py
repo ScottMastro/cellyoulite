@@ -1199,12 +1199,13 @@ def well_growth(mount_id: str, batch: str, folder_name: str,
 @app.get("/api/bundle-export")
 def bundle_export(include_raw: int = 0) -> Response:
     """Stream a .tar.gz containing the current processed dataset:
-    .align_cache, .cellpose_cache, tracks, annotations. With include_raw=1
-    the raw data/ folder is bundled too (large)."""
+    .align_cache, .cellpose_cache, tracks. With include_raw=1 the raw data/
+    folder is bundled too (large). Annotations are not included — they live
+    in the database now, and travel with it."""
     import io
     import tarfile
     import time as _t
-    dirs = [".align_cache", ".cellpose_cache", "tracks", "annotations"]
+    dirs = [".align_cache", ".cellpose_cache", "tracks"]
     if include_raw:
         dirs.append("data")
 
@@ -1249,7 +1250,7 @@ def bundle_export(include_raw: int = 0) -> Response:
 
 # Bundle members live under these roots; each gets the batch spliced in on
 # import, so one batch's results can never land on another's.
-_BUNDLE_ROOTS = (".align_cache", ".cellpose_cache", "tracks", "annotations", "data")
+_BUNDLE_ROOTS = (".align_cache", ".cellpose_cache", "tracks", "data")
 
 
 def _rebatch_member_name(name: str, batch: str) -> str | None:
@@ -2008,17 +2009,9 @@ def detect_debug(
 
 
 # ---------------------- annotation tool ----------------------
-
-_ANN_ROOT = Path.cwd() / "annotations"
-
-
-def _ann_path(batch: str, well: str, label: str) -> Path:
-    """annotations/<batch>/<well>/<label>.json. Authored ground truth, so it
-    is batch-scoped like every other per-well artefact — "DMSO r1" exists in
-    more than one batch."""
-    p = _scoped(_ANN_ROOT, batch, well)
-    p.mkdir(parents=True, exist_ok=True)
-    return p / f"{_safe_name(label)}.json"
+# Ground-truth circles live in the DB (migration v4), alongside every other
+# authored decision — they used to be annotations/<well>/<label>.json, which
+# had no batch scoping and sat outside the database backup.
 
 
 @app.get("/annotate", response_class=HTMLResponse)
@@ -2030,14 +2023,10 @@ def annotate_page(request: Request) -> HTMLResponse:
 
 @app.get("/api/annotations")
 def get_annotations(batch: str, well: str, label: str) -> dict:
-    path = _ann_path(batch, well, label)
-    if not path.is_file():
+    data = repo.get_annotation(batch, well, label)
+    if data is None:
         return {"circles": [], "exists": False}
-    try:
-        data = json.loads(path.read_text())
-    except (OSError, ValueError):
-        return {"circles": [], "exists": False}
-    return {"circles": data.get("circles", []), "exists": True,
+    return {"circles": data["circles"], "exists": True,
             "meta": {k: v for k, v in data.items() if k != "circles"}}
 
 
@@ -2057,18 +2046,11 @@ def save_annotations(batch: str, well: str, label: str, aligned: int = 0,
             })
         except (KeyError, TypeError, ValueError):
             raise HTTPException(status_code=400, detail="bad circle in payload")
-    payload = {
-        "batch": batch,
-        "well": well,
-        "label": label,
-        "aligned": bool(aligned),
-        "key": body.get("key"),
-        "image_w": body.get("image_w"),
-        "image_h": body.get("image_h"),
-        "circles": clean,
-    }
-    _ann_path(batch, well, label).write_text(json.dumps(payload, indent=2))
-    return {"ok": True, "n": len(clean)}
+    n = repo.set_annotation(
+        batch, well, label, clean, aligned=bool(aligned),
+        source_key=body.get("key"),
+        image_w=body.get("image_w"), image_h=body.get("image_h"))
+    return {"ok": True, "n": n}
 
 
 @app.get("/healthz")

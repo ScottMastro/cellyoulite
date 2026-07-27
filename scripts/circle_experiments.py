@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import argparse
 import html
-import json
 from collections import defaultdict
 from pathlib import Path
 
@@ -27,10 +26,11 @@ import numpy as np
 from scipy.ndimage import gaussian_laplace, maximum_filter
 from skimage.io import imread
 
+from cellyoulite.db import repo
+from cellyoulite.db.migrate import migrate
 from cellyoulite.io.grid import discover_grid
 from cellyoulite.pipeline.align import compute_alignment_cached, paste_onto_canvas
-from cellyoulite.pipeline.circle_methods import detect_circles, DEFAULT_PARAMS
-
+from cellyoulite.pipeline.circle_methods import DEFAULT_PARAMS, detect_circles
 
 MATCH_CENTER_FRAC = 0.5
 MATCH_R_RATIO = 1.6
@@ -1075,15 +1075,16 @@ def main():
     spec = discover_grid("data")
     wells_by_name = {w.folder_name: w for w in spec.wells}
 
-    ann_files = sorted(Path("annotations").rglob("*.json"))
-    if not ann_files:
-        raise SystemExit("no annotations found")
+    migrate()
+    ann_rows = repo.list_annotations()
+    if not ann_rows:
+        raise SystemExit("no annotations in the database — see "
+                         "scripts/import_annotations.py")
 
     # Pre-load each annotated well's aligned stack once.
     stack_cache: dict[str, list[np.ndarray]] = {}
     annotations: list[tuple] = []  # (well_name, t_idx, ann dict)
-    for f in ann_files:
-        ann = json.loads(f.read_text())
+    for ann in ann_rows:
         w = wells_by_name.get(ann["well"])
         if w is None:
             continue

@@ -111,11 +111,46 @@ def _v3(conn) -> None:
         conn.execute("PRAGMA foreign_keys=ON")
 
 
+def _v4(conn) -> None:
+    """Frame annotations into the DB.
+
+    Hand-drawn ground-truth circles were the last authored artefact still
+    living only as files (annotations/<well>/<label>.json), keyed by well name
+    alone — so two batches would collide on "DMSO r1". Storing them against
+    well_id gives them batch scoping and puts them in the same backup as every
+    other authored decision. Purely additive; scripts/import_annotations.py
+    loads the existing files."""
+    conn.execute("""
+        CREATE TABLE annotation (
+          id         INTEGER PRIMARY KEY,
+          well_id    INTEGER NOT NULL REFERENCES well(id) ON DELETE CASCADE,
+          label      TEXT NOT NULL,        -- frame, e.g. "00d04h15m"
+          aligned    INTEGER NOT NULL,     -- drawn on the aligned canvas?
+          source_key TEXT,                 -- image key it was drawn on
+          image_w    INTEGER,
+          image_h    INTEGER,
+          updated_at TEXT NOT NULL,
+          UNIQUE (well_id, label)
+        )""")
+    conn.execute("""
+        CREATE TABLE annotation_circle (
+          annotation_id INTEGER NOT NULL REFERENCES annotation(id) ON DELETE CASCADE,
+          idx           INTEGER NOT NULL,  -- draw order, keeps them stable
+          cx            REAL NOT NULL,
+          cy            REAL NOT NULL,
+          r             REAL NOT NULL,
+          star          INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (annotation_id, idx)
+        )""")
+    conn.execute("CREATE INDEX idx_annotation_well ON annotation(well_id)")
+
+
 # (target_version, step). Each runs once, in order, when user_version < target.
 _MIGRATIONS = [
     (1, _v1),
     (2, _v2),
     (3, _v3),
+    (4, _v4),
 ]
 
 

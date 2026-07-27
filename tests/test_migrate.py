@@ -1,8 +1,13 @@
-"""Migration tests, focused on v3 — the one step that rebuilds a table rather
-than adding to it. `well` is rebuilt to move its key from UNIQUE(folder_name)
-to UNIQUE(batch_id, folder_name), and alignment/track/well_validation all
-cascade on well.id, so a mistake there silently destroys authored curation.
-These tests pin that it doesn't."""
+"""Migration tests.
+
+Most of these cover v3 — the one step that rebuilds a table rather than adding
+to it. `well` is rebuilt to move its key from UNIQUE(folder_name) to
+UNIQUE(batch_id, folder_name), and alignment/track/well_validation all cascade
+on well.id, so a mistake there silently destroys authored curation. These tests
+pin that it doesn't.
+
+The rest cover v4, which moves hand-drawn ground truth into the database so it
+is batch-scoped and backed up with everything else."""
 from __future__ import annotations
 
 import sqlite3
@@ -11,6 +16,9 @@ from pathlib import Path
 import pytest
 
 from cellyoulite.db import migrate as mig
+from cellyoulite.db import repo
+
+_LATEST = mig._MIGRATIONS[-1][0]
 
 # Row counts the fixture below creates, per guarded table.
 _EXPECTED = {
@@ -97,7 +105,7 @@ def test_v3_preserves_every_row(v2_db):
     assert _counts(v2_db) == _EXPECTED
 
     conn = _open(v2_db)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == _LATEST
     assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     assert not conn.execute("PRAGMA foreign_key_check").fetchall()
     conn.close()
@@ -173,6 +181,56 @@ def test_v3_is_idempotent(v2_db):
     assert conn.execute("SELECT COUNT(*) FROM batch").fetchone()[0] == 1
     conn.close()
     assert _counts(v2_db) == _EXPECTED
+
+
+def test_v4_stores_annotations_against_the_well(v2_db, monkeypatch):
+    """Ground truth used to be files keyed by well name alone. It now hangs off
+    well_id, so the same well name in two batches keeps its own circles."""
+    monkeypatch.setenv("CELLYOULITE_DB", str(v2_db))
+    mig.migrate()
+
+    repo.set_annotation("CA1 (May 2026)", "DMSO r1", "00d00h00m",
+                        [{"cx": 10.0, "cy": 20.0, "r": 5.0, "star": True},
+                         {"cx": 30.0, "cy": 40.0, "r": 6.0}],
+                        aligned=True, source_key="m_x/b/DMSO r1/a.tif",
+                        image_w=100, image_h=80)
+    repo.set_annotation("2026-07-22", "DMSO r1", "00d00h00m",
+                        [{"cx": 99.0, "cy": 99.0, "r": 9.0}])
+
+    may = repo.get_annotation("CA1 (May 2026)", "DMSO r1", "00d00h00m")
+    jul = repo.get_annotation("2026-07-22", "DMSO r1", "00d00h00m")
+    assert [c["cx"] for c in may["circles"]] == [10.0, 30.0]   # draw order kept
+    assert may["circles"][0]["star"] is True
+    assert may["aligned"] is True and may["image_w"] == 100
+    assert [c["cx"] for c in jul["circles"]] == [99.0]
+    assert repo.get_annotation("CA1 (May 2026)", "FSK r1", "00d00h00m") is None
+
+
+def test_v4_annotation_write_replaces_only_that_frame(v2_db, monkeypatch):
+    monkeypatch.setenv("CELLYOULITE_DB", str(v2_db))
+    mig.migrate()
+    b = "CA1 (May 2026)"
+    repo.set_annotation(b, "DMSO r1", "00d00h00m", [{"cx": 1.0, "cy": 1.0, "r": 1.0}])
+    repo.set_annotation(b, "DMSO r1", "00d00h15m", [{"cx": 2.0, "cy": 2.0, "r": 2.0}])
+    # Re-drawing one frame must not disturb the other.
+    repo.set_annotation(b, "DMSO r1", "00d00h00m", [{"cx": 7.0, "cy": 7.0, "r": 7.0},
+                                                    {"cx": 8.0, "cy": 8.0, "r": 8.0}])
+    assert len(repo.get_annotation(b, "DMSO r1", "00d00h00m")["circles"]) == 2
+    assert repo.get_annotation(b, "DMSO r1", "00d00h15m")["circles"][0]["cx"] == 2.0
+    assert len(repo.list_annotations(b)) == 2
+    assert len(repo.list_annotations("2026-07-22")) == 0
+
+
+def test_v4_annotations_cascade_with_their_well(v2_db, monkeypatch):
+    monkeypatch.setenv("CELLYOULITE_DB", str(v2_db))
+    mig.migrate()
+    repo.set_annotation("CA1 (May 2026)", "DMSO r1", "00d00h00m",
+                        [{"cx": 1.0, "cy": 1.0, "r": 1.0}])
+    conn = _open(v2_db)
+    conn.execute("DELETE FROM well WHERE folder_name='DMSO r1'")
+    assert conn.execute("SELECT COUNT(*) FROM annotation").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM annotation_circle").fetchone()[0] == 0
+    conn.close()
 
 
 def test_v3_rolls_back_if_the_row_count_guard_trips(v2_db, monkeypatch):

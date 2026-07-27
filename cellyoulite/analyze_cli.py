@@ -38,7 +38,7 @@ _REPO_ROOT = _PKG_ROOT.parent                        # repo root (holds scripts/
 _SCRIPTS = _REPO_ROOT / "scripts"
 
 # Result dirs that make up an uploadable bundle (matches the web exporter).
-_RESULT_DIRS = [".align_cache", ".cellpose_cache", "tracks", "annotations"]
+_RESULT_DIRS = [".align_cache", ".cellpose_cache", "tracks"]
 # "[  12/ 420]" style progress emitted by every stage script.
 _PROGRESS_RE = re.compile(r"\[\s*(\d+)\s*/\s*(\d+)\s*\]")
 
