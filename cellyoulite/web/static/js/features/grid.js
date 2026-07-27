@@ -4,6 +4,7 @@
 import { $, escapeHtml, setStatus, renderPills } from "../core/dom.js";
 import { imgUrl } from "../core/api.js";
 import { state, wellKey } from "../core/state.js";
+import * as boxplot from "./boxplot.js";
 import * as well from "./well.js";
 
 export async function refreshGrid() {
@@ -33,28 +34,41 @@ export async function refreshGrid() {
   }
 }
 
-export function renderBatchTabs() {
-  const el = $("batch-tabs");
-  if (!el) return;
-  // Nothing to filter between until a second batch exists.
-  el.hidden = state.batches.length < 2;
-  if (el.hidden) return;
+// Curate and Results each get a row, both driving the one state.batch, so the
+// two views can never disagree about which batch is on screen.
+const _BATCH_TAB_HOSTS = ["batch-tabs", "batch-tabs-results"];
 
+export function renderBatchTabs() {
+  // Nothing to filter between until a second batch exists.
+  const hide = state.batches.length < 2;
   const total = Object.values(state.batchCounts).reduce((a, b) => a + b, 0);
   const tab = (value, label, n) =>
     `<button class="batch-tab${value === state.batch ? " active" : ""}"`
     + ` data-batch="${value === null ? "" : escapeHtml(value)}"`
     + ` title="${escapeHtml(label)} — ${n} well${n === 1 ? "" : "s"}">`
     + `${escapeHtml(label)}<span class="batch-tab-n">${n}</span></button>`;
-
-  el.innerHTML = [tab(null, "All", total)].concat(
+  const html = [tab(null, "All", total)].concat(
     state.batches.map(b => tab(b, b, state.batchCounts[b] ?? 0))).join("");
-  el.querySelectorAll(".batch-tab").forEach(b => {
-    b.onclick = () => {
-      state.batch = b.dataset.batch || null;
-      refreshGrid();
-    };
-  });
+
+  for (const id of _BATCH_TAB_HOSTS) {
+    const el = $(id);
+    if (!el) continue;
+    el.hidden = hide;
+    if (hide) continue;
+    el.innerHTML = html;
+    el.querySelectorAll(".batch-tab").forEach(b => {
+      b.onclick = () => selectBatch(b.dataset.batch || null);
+    });
+  }
+}
+
+export function selectBatch(name) {
+  if (state.batch === name) return;
+  state.batch = name;
+  // Refresh both views: the well list, and the distributions, which pool
+  // organoids per treatment and must not mix batches.
+  refreshGrid();
+  boxplot.refreshBoxplot();
 }
 
 function thumbHtml(w, treatment) {

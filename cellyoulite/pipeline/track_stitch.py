@@ -350,3 +350,43 @@ def render_track_strips(
             "shape": _png_bytes(np.vstack([hdr, shape_row])),
             "both": _png_bytes(both),
             "side": side, "n": len(raw_panels)}
+
+
+# ---------------------- list thumbnails ----------------------
+# The organoid list shows one row per organoid at ~88 px tall. Serving the
+# full-resolution strip there is ~0.5 MB apiece, so rows get a small JPEG
+# cached on disk. Shared with scripts/restitch.py, which pre-generates them so
+# the first real request is already warm.
+
+THUMB_PX = 128
+
+
+def thumb_tag(batch: str, well: str, track_id: int, variant: str,
+              thumb_px: int, mtime_ns: int) -> str:
+    """Cache key for one thumbnail. Includes the source strip's mtime, so a
+    re-rendered strip invalidates its thumbnail automatically."""
+    import hashlib
+    return hashlib.sha1(
+        f"{batch}|{well}|{track_id}|{variant}|{thumb_px}|{mtime_ns}".encode()
+    ).hexdigest()
+
+
+def write_thumb(strip_path, out_path, thumb_px: int = THUMB_PX) -> bool:
+    """Downscale a stitch strip to `thumb_px` tall as JPEG. Returns False if
+    the strip can't be read; the caller then falls back to the full strip.
+    Written to a temp file and renamed, so a reader never sees a partial JPEG."""
+    arr = cv2.imread(str(strip_path), cv2.IMREAD_COLOR)
+    if arr is None:
+        return False
+    h, w = arr.shape[:2]
+    if h > thumb_px:
+        arr = cv2.resize(arr, (max(1, round(w * thumb_px / h)), thumb_px),
+                         interpolation=cv2.INTER_AREA)
+    ok, buf = cv2.imencode(".jpg", arr, [int(cv2.IMWRITE_JPEG_QUALITY), 82])
+    if not ok:
+        return False
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = out_path.with_suffix(".jpg.tmp")
+    tmp.write_bytes(buf.tobytes())
+    tmp.replace(out_path)
+    return True

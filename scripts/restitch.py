@@ -24,9 +24,17 @@ from cellyoulite.db import repo
 from cellyoulite.db.migrate import migrate
 from cellyoulite.io.grid import discover_grid
 from cellyoulite.pipeline.align import compute_alignment_cached, paste_onto_canvas
-from cellyoulite.pipeline.track_stitch import render_track_strips
+from cellyoulite.pipeline.track_stitch import (
+    THUMB_PX,
+    render_track_strips,
+    thumb_tag,
+    write_thumb,
+)
 
 _VARIANTS = ("raw", "seg", "diff", "shape", "both")
+# The list row shows "seg" or "raw" depending on the annotated toggle, so
+# only those two need a pre-warmed thumbnail.
+_THUMB_VARIANTS = ("raw", "seg")
 
 
 def _data_dir() -> Path:
@@ -55,16 +63,19 @@ def main() -> None:
         return
     tracks_root = Path("tracks")
     cp_root = Path(".cellpose_cache")
+    thumb_root = Path(".stitch_thumbs")
     n_wells = n_tracks = 0
     for batch, spec in _batches(ddir):
         print(f"{batch}:")
         for w in spec.wells:
-            n_tracks += _restitch_well(batch, w, tracks_root, cp_root)
+            n_tracks += _restitch_well(batch, w, tracks_root, cp_root,
+                                       thumb_root)
             n_wells += 1
     print(f"done: {n_tracks} organoids across {n_wells} wells")
 
 
-def _restitch_well(batch: str, w, tracks_root: Path, cp_root: Path) -> int:
+def _restitch_well(batch: str, w, tracks_root: Path, cp_root: Path,
+                   thumb_root: Path) -> int:
     """Re-render every cached stitch for one well. Returns organoids written."""
     data = repo.get_tracks(batch, w.folder_name)
     if not data or not data.get("tracks"):
@@ -104,8 +115,17 @@ def _restitch_well(batch: str, w, tracks_root: Path, cp_root: Path) -> int:
         if not strips:
             continue
         for v in _VARIANTS:
-            if v in strips:
-                (outdir / f"track_{t['id']}_{v}.png").write_bytes(strips[v])
+            if v not in strips:
+                continue
+            sp = outdir / f"track_{t['id']}_{v}.png"
+            sp.write_bytes(strips[v])
+            # Warm the list thumbnail too. The organoid list asks for these
+            # the moment a well is opened, and rendering one per row during
+            # the request is what made a cold well slow.
+            if v in _THUMB_VARIANTS:
+                tag = thumb_tag(batch, w.folder_name, t["id"], v, THUMB_PX,
+                                sp.stat().st_mtime_ns)
+                write_thumb(sp, thumb_root / f"{tag}.jpg", THUMB_PX)
         n += 1
     print(f"  {w.folder_name:24s} {n} organoids restitched")
     return n

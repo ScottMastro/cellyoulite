@@ -79,6 +79,7 @@ function renderBoxplot(data) {
   // Transform every box's stats once, so renderers don't need to know
   // about the scale; they just plot what's given to them.
   const tBoxes = boxes.map(b => ({
+    batch: b.batch,
     treatment: b.treatment,
     minutes: b.minutes,
     replicate: b.replicate,
@@ -101,8 +102,10 @@ function renderBoxplot(data) {
 
   // Summary
   const totalN = boxes.reduce((a, b) => a + (b.n || 0), 0);
+  const nBatches = (data.batches || []).length;
   $("box-summary").innerHTML =
-    `<strong>${treatments.length}</strong> treatment(s) · `
+    (nBatches > 1 ? `<strong>${nBatches}</strong> batches · ` : "")
+    + `<strong>${treatments.length}</strong> treatment(s) · `
     + `<strong>${minutes.length}</strong> timepoints · `
     + `<strong>${totalN}</strong> organoid-frame observations`;
 
@@ -121,15 +124,24 @@ function renderBoxplot(data) {
     return;
   }
 
-  const byTreat = new Map(treatments.map(t => [t, []]));
-  for (const b of tBoxes) {
-    if (byTreat.has(b.treatment)) byTreat.get(b.treatment).push(b);
+  // One facet per (batch, treatment). The same treatment name exists in more
+  // than one batch, so merging them here would put two different experiments
+  // — on different time axes — into a single panel.
+  const batches = data.batches || [];
+  const cells = [];
+  for (const bx of (batches.length ? batches : [null])) {
+    for (const t of treatments) {
+      const sel = tBoxes.filter(b => b.treatment === t &&
+                                     (bx === null || b.batch === bx));
+      if (sel.length) cells.push({ batch: bx, treatment: t, boxes: sel });
+    }
   }
+  const showBatch = batches.length > 1;
   const subWidth = 420, subHeight = 230;
-  const tiles = treatments.map(t => {
+  const tiles = cells.map(({ batch: bx, treatment: t, boxes: sel }) => {
     const sub = renderBoxSubplot({
-      title: t,
-      boxes: byTreat.get(t),
+      title: showBatch ? `${t}  ·  ${bx}` : t,
+      boxes: sel,
       minutes, treatments: [t], series, byRep, scale,
       yMin, yMax,
       width: subWidth, height: subHeight, large: false,

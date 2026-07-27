@@ -725,26 +725,16 @@ def set_track_star(mount_id: str, batch: str, folder_name: str, track_id: int,
 def _stitch_thumb(cached: Path, batch: str, folder_name: str, track_id: int,
                   variant: str, thumb: int) -> Response:
     """Serve a small JPEG of a cached stitch strip, downscaled to `thumb` px
-    tall. Cached on disk and keyed by the source strip's mtime."""
-    mtime = cached.stat().st_mtime_ns
-    tag = hashlib.sha1(
-        f"{batch}|{folder_name}|{track_id}|{variant}|{thumb}|{mtime}".encode()).hexdigest()
+    tall. Cached on disk and keyed by the source strip's mtime.
+
+    scripts/restitch.py writes these ahead of time using the same key, so a
+    warmed instance never renders one during a request."""
+    from cellyoulite.pipeline.track_stitch import thumb_tag, write_thumb
+    tag = thumb_tag(batch, folder_name, track_id, variant, thumb,
+                    cached.stat().st_mtime_ns)
     tpath = _STITCH_THUMB_ROOT / f"{tag}.jpg"
-    if not tpath.is_file():
-        arr = cv2.imread(str(cached), cv2.IMREAD_COLOR)
-        if arr is None:
-            return FileResponse(cached, media_type="image/png")
-        h, w = arr.shape[:2]
-        if h > thumb:
-            arr = cv2.resize(arr, (max(1, round(w * thumb / h)), thumb),
-                             interpolation=cv2.INTER_AREA)
-        ok, buf = cv2.imencode(".jpg", arr, [int(cv2.IMWRITE_JPEG_QUALITY), 82])
-        if not ok:
-            return FileResponse(cached, media_type="image/png")
-        _STITCH_THUMB_ROOT.mkdir(parents=True, exist_ok=True)
-        tmp = tpath.with_suffix(".jpg.tmp")
-        tmp.write_bytes(buf.tobytes())
-        tmp.replace(tpath)
+    if not tpath.is_file() and not write_thumb(cached, tpath, thumb):
+        return FileResponse(cached, media_type="image/png")
     return FileResponse(tpath, media_type="image/jpeg",
                         headers={"Cache-Control": "public, max-age=86400"})
 
@@ -981,7 +971,10 @@ def boxplot_data(treatment: str | None = None, by_replicate: int = 0,
             continue
         overrides = _load_validation(b, w.folder_name)
         tp_minutes = {tp.label: tp.minutes for tp in w.timepoints}
-        key = (w.treatment, w.replicate if by_replicate else None)
+        # Batch is part of the key: the same treatment name exists in more
+        # than one batch, and pooling them would average two different
+        # experiments — which also have different time axes.
+        key = (b, w.treatment, w.replicate if by_replicate else None)
         for tr in data.get("tracks", []):
             accepted = overrides.get(tr["id"], bool(tr.get("valid")))
             if not accepted:
@@ -1025,8 +1018,10 @@ def boxplot_data(treatment: str | None = None, by_replicate: int = 0,
     boxes = []
     treatments_set: set[str] = set()
     replicates_set: set[int] = set()
+    batches_set: set[str] = set()
     for key, by_min in sorted(bucket.items()):
-        tx, rep = key
+        bx, tx, rep = key
+        batches_set.add(bx)
         treatments_set.add(tx)
         if rep is not None:
             replicates_set.add(rep)
@@ -1034,6 +1029,7 @@ def boxplot_data(treatment: str | None = None, by_replicate: int = 0,
             stats = _box(by_min[mn])
             if not stats:
                 continue
+            stats["batch"] = bx
             stats["treatment"] = tx
             stats["minutes"] = mn
             if rep is not None:
@@ -1042,6 +1038,7 @@ def boxplot_data(treatment: str | None = None, by_replicate: int = 0,
     return {
         "treatments": sorted(treatments_set),
         "replicates": sorted(replicates_set),
+        "batches": sorted(batches_set),
         "minutes": sorted(minutes_seen),
         "boxes": boxes,
         "by_replicate": bool(by_replicate),

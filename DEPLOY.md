@@ -54,6 +54,24 @@ fingerprint, which differs between batches.
 
 Both steps are idempotent and report "nothing to move" / "skipped" on a repeat.
 
+## Warming the organoid list
+
+The Curate list renders one row per organoid, each a small JPEG of that
+organoid's stitch strip. Tracking only writes strips for organoids it judged
+valid, so the rest would be rendered on demand — the first visit to a well
+pays for every rejected organoid in it.
+
+After importing results, warm both the strips and their thumbnails:
+
+```bash
+cd /opt/cellyoulite
+sudo -u cellyoulite python -m scripts.restitch
+```
+
+It reads the tracks already in the database plus the cached masks — no GPU, no
+re-segmentation. About 2.5 minutes for 1600 organoids. Skipping it costs
+nothing but latency: the server still renders on demand and caches the result.
+
 ## First-time / one-shot database backfill
 
 The DB (`cellyoulite.db`) is the source of truth for alignment, tracks,
