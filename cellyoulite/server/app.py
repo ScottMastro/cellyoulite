@@ -503,8 +503,10 @@ _EDGES_CACHE_ROOT = Path.cwd() / ".edges_cache"
 
 
 def _safe_name(name: str) -> str:
-    """A path segment that can't escape its parent."""
-    return name.replace("/", "_")
+    """A path segment that can't escape its parent: no separators, and never
+    "." or ".." (which `root / name` would resolve to the root or its parent)."""
+    name = name.replace("/", "_").replace("\\", "_")
+    return "_" if name in ("", ".", "..") else name
 
 
 def _scoped(root: Path, batch: str, *parts: str) -> Path:

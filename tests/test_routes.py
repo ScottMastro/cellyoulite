@@ -138,6 +138,22 @@ def test_unknown_batch_is_a_404_not_a_crash(client):
     assert r.status_code == 404
 
 
+def test_dot_dot_batch_cannot_reach_outside_its_root(client, tmp_path):
+    """`..` as a batch or folder name used to pass straight through
+    `_safe_name`, so `<root>/..` climbed one level out of the cache/data root."""
+    leak = tmp_path / "leak"
+    leak.mkdir()
+    imsave(leak / f"x_{LABELS[0]}.tif", _frame(0), check_contrast=False)
+    (leak / "track_1_raw.png").write_bytes(b"not yours")
+
+    r = client.get("/api/download-images", params={"batch": ".."})
+    assert r.status_code == 404
+    r = client.get("/api/track-stitch", params={
+        "mount_id": _mount(client), "batch": "..", "folder_name": "leak",
+        "track_id": 1, "variant": "raw"})
+    assert r.status_code == 404
+
+
 def _seed_organoid(client, batch):
     """One organoid with a detection in each frame, plus a mask sidecar so the
     stitch renderer has something to crop."""
