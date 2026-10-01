@@ -53,6 +53,15 @@ def _position_of(stem: str) -> str | None:
     return m.group("position") if m else None
 
 
+def _position_order(position: str | None) -> tuple:
+    """Sort key putting plate positions in plate order: "E7" before "E10", where
+    a plain string sort would put E10 first. Unparsed (None) sorts last."""
+    if position is None:
+        return (1, [])
+    return (0, [(0, int(t), "") if t.isdigit() else (1, 0, t)
+                for t in re.split(r"(\d+)", position) if t])
+
+
 def is_image_name(name: str) -> bool:
     """True if `name` has a recognised image extension."""
     return Path(name).suffix.lower() in _IMAGE_EXTS
@@ -154,7 +163,7 @@ def discover_grid(folder: str | Path) -> GridSpec:
 
         # Folder names the condition only — each position is a replicate.
         treatment = _normalize_treatment(sub.name)
-        for i, position in enumerate(sorted(groups, key=lambda p: (p is None, p)), 1):
+        for i, position in enumerate(sorted(groups, key=_position_order), 1):
             wells.append(Well(
                 treatment=treatment,
                 replicate=i,

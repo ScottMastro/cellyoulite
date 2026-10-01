@@ -63,6 +63,19 @@ def test_plate_folder_splits_positions_into_replicates(tmp_path: Path):
             assert (tmp_path / tp.key).exists()
 
 
+def test_plate_positions_number_in_plate_order(tmp_path: Path):
+    """Column 10 comes after column 9, not before column 7."""
+    _plate(tmp_path, "10", ["E10", "E7", "E8", "E9"], ["00d00h00m"])
+
+    spec = discover_grid(tmp_path)
+    assert [(w.folder_name, w.position) for w in spec.wells] == [
+        ("10 r1", "2026_7_22_E7"),
+        ("10 r2", "2026_7_22_E8"),
+        ("10 r3", "2026_7_22_E9"),
+        ("10 r4", "2026_7_22_E10"),
+    ]
+
+
 def test_plate_folders_yield_unique_well_names(tmp_path: Path):
     """Uneven position counts still number cleanly, and nothing collides."""
     _plate(tmp_path, "DMSO", ["B2", "B3"], ["00d00h00m"])
