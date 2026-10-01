@@ -31,7 +31,7 @@ import tarfile
 import time
 from pathlib import Path
 
-from cellyoulite.io.grid import is_experiment_dir
+from cellyoulite.io.grid import discover_grid, is_experiment_dir
 
 _PKG_ROOT = Path(__file__).resolve().parent          # .../cellyoulite
 _REPO_ROOT = _PKG_ROOT.parent                        # repo root (holds scripts/)
@@ -65,7 +65,9 @@ def _detect_device() -> str:
 
 def _setup_workdir(console, input_arg, workdir: Path) -> list[str]:
     """Ensure ``workdir/data`` exists and points at the experiments.
-    Returns the sorted list of experiment folder names found."""
+    Returns the names of the wells found ("DMSO r1"), which is what the stage
+    scripts filter on — a plate folder holds several wells, so its directory
+    name alone can't select one."""
     workdir.mkdir(parents=True, exist_ok=True)
     data = workdir / "data"
 
@@ -100,10 +102,10 @@ def _setup_workdir(console, input_arg, workdir: Path) -> list[str]:
     if not data.is_dir():
         _fail(console, f"no data in workdir ({data}); pass an input folder/archive")
 
-    exps = sorted(c.name for c in data.iterdir() if is_experiment_dir(c))
-    if not exps:
+    wells = sorted(w.folder_name for w in discover_grid(data).wells)
+    if not wells:
         _fail(console, f"no experiment folders under {data}")
-    return exps
+    return wells
 
 
 def _run_stage(console, title: str, cmd: list[str], cwd: Path) -> float:
@@ -217,7 +219,7 @@ def main() -> None:
     ap.add_argument("--workdir", default="./cyl-analysis",
                     help="where the pipeline runs / caches live (default %(default)s)")
     ap.add_argument("-e", "--experiments", nargs="*", default=None,
-                    help="subset of experiment folder names (default: all)")
+                    help='subset of wells, e.g. "DMSO r1" (default: all)')
     ap.add_argument("-o", "--out", default=None,
                     help="results bundle path (default results_<stamp>.tar.gz)")
     ap.add_argument("--workers", type=int, default=4,
